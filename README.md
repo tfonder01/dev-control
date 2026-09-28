@@ -47,14 +47,41 @@ The server can execute only predefined `git` and `pnpm create next-app` operatio
 Project detail actions accept only an opaque repository ID and a fixed action name. DevHub resolves the repository path from its server-side workspace snapshot; browser input never supplies a path or command.
 
 - Open the trusted repository in Cursor, IntelliJ IDEA, Windows Explorer, or a local terminal.
-- Start only a detected `dev` package script using its detected package manager.
+- Start a detected Next.js `dev` script in Dev mode, or run the detected `build` script followed by the detected `start` script in Preview mode, using only the detected package manager.
 - Start detected Spring Boot repositories through the Maven wrapper, or an installed Maven fallback, using only the fixed `spring-boot:run` goal.
 - Run only detected `test`, `lint`, and `build` package scripts, plus Maven wrapper `test` and `verify` goals.
 - Stop only dev processes started and tracked by the current DevHub server process.
 
 Dev-process ownership is intentionally in memory. Restarting DevHub forgets ownership and therefore disables Stop Dev for the orphaned process rather than risking termination of an unrelated process. Port detection uses explicit script arguments, the Next.js default when applicable, process output, and a listening-port check. Start Dev searches at most 20 consecutive ports from the detected preference and never stops or claims an existing listener.
 
+Next.js launch mode and application profile are separate. Dev mode preserves hot reload. Preview is an explicit **Build & Start Preview** operation: DevHub always completes a production build before starting the production server and passes the selected dynamic port through the child environment. In-flight launches are coalesced per repository, so a second Preview request cannot create a duplicate process.
+
+For each mode, DevHub resolves Next.js environment files in framework order (`.env`, the mode-specific file, `.env.local`, then the mode-specific local file). Recognized mode/profile selectors such as `DEMO_MODE`, `APP_MODE`, `APP_ENV`, `ENVIRONMENT`, and `PROFILE` are removed from DevHub's inherited process environment and reintroduced only when the target repository configures them. The Development panel shows normalized, non-secret environment/profile states before launch; raw values and secret-bearing variables remain server-only. The same resolved environment is used for Preview build and start so build-time public configuration remains consistent.
+
 Spring Boot ports are read conservatively from base application configuration, falling back to port 8080. DevHub uses the same bounded alternate-port selection and passes a fixed runtime port override. Docker Compose port mappings and container ownership are intentionally not managed.
+
+Before a Spring Boot launch, DevHub resolves a server-only local runtime environment in this order: the DevHub process environment, `.env`, `.env.local`, then an optional `development.envFile` named by a repo-local `devhub.yml` or `devhub.yaml`. Later entries in one env file win. The configured file must resolve inside the trusted repository. Values are injected only into the Maven child process; the browser receives status metadata and never receives secret values. Recognizable required placeholders and local PostgreSQL datasource ports are checked before Maven starts.
+
+An optional secret-free runtime profile can make inference explicit:
+
+```yaml
+development:
+  type: spring-boot
+  envFile: .env
+  port: 8080
+prerequisites:
+  dockerCompose: false
+  requiredEnv:
+    - JWT_SECRET
+  ports:
+    - 5432
+```
+
+For confidently identified Compose dependencies with published host ports, the Development panel exposes separate **Start Dependencies** and **Stop Dependencies** actions. DevHub runs only targeted `docker compose up -d <identified services>` and `docker compose stop <tracked services>` operations under a deterministic repository-scoped Compose project name. It never starts an application service, runs an unscoped Compose stack, removes containers or volumes, prunes Docker data, or stops Docker Desktop.
+
+Dependency services are recognized conservatively from service names, known images, dependency-specific environment markers, and published ports. Current recognized types are PostgreSQL, MySQL/MariaDB, Redis, RabbitMQ, and Kafka. Ambiguous or unpublished services remain metadata-only. Stop is available only for the exact service set started and tracked by the current DevHub process.
+
+When a JDBC datasource hostname matches a detected Compose service and its container port has a published host mapping, DevHub derives a host-only URL for the Maven child environment, replacing only the Compose hostname and port with `localhost:<published-port>`. Database names, query parameters, and credentials remain unchanged; repository env and Spring configuration files are never rewritten.
 
 ## Scan behavior
 

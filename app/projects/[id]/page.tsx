@@ -5,7 +5,10 @@ import { ArrowLeft, Box, Check, FileCode2, FolderGit2, GitBranch, GitCommitHoriz
 
 import { formatActivity, PageShell, RepositoryState, TechnologyBadge } from "@/app/components";
 import { ProjectActionsPanel } from "@/app/project-actions-panel";
+import { getDependencyStatus } from "@/lib/projects/dependencies";
 import { detectRunningDevServer } from "@/lib/projects/processes";
+import { resolveNodeRuntimeProfiles } from "@/lib/projects/node-runtime";
+import { resolveSpringRuntime } from "@/lib/projects/runtime-profile";
 import { getRepositoryFromSnapshot } from "@/lib/workspace/snapshot";
 
 export default async function ProjectPage({ params }: { params: Promise<{ id: string }> }) {
@@ -13,7 +16,13 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
   const { id } = await params;
   const repository = await getRepositoryFromSnapshot(id);
   if (!repository) notFound();
-  const devServer = await detectRunningDevServer(repository);
+  const isNextJs = repository.technologies.some((technology) => technology.name === "Next.js");
+  const [devServer, springRuntime, dependencies, nodeRuntimes] = await Promise.all([
+    detectRunningDevServer(repository),
+    repository.capabilities.hasSpringBoot ? resolveSpringRuntime(repository).then((runtime) => runtime.status) : null,
+    repository.capabilities.hasSpringBoot ? getDependencyStatus(repository) : null,
+    isNextJs ? resolveNodeRuntimeProfiles(repository) : null,
+  ]);
 
   return (
     <PageShell>
@@ -42,6 +51,9 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
         technologies={repository.technologies.map((technology) => technology.name)}
         capabilities={repository.capabilities}
         initialDevServer={devServer}
+        initialSpringRuntime={springRuntime}
+        initialDependencies={dependencies}
+        initialNodeRuntimes={nodeRuntimes}
       />
 
       <section className="detail-grid">

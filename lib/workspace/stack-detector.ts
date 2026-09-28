@@ -1,6 +1,6 @@
 import "server-only";
 
-import { access, readFile } from "node:fs/promises";
+import { access, readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 
 import type { PackageManager, ProjectCapabilities, ProjectCommand, ProjectScript, Technology } from "./types";
@@ -17,6 +17,11 @@ const CONFIGURATION_MARKERS = [
   "CLAUDE.md",
   "README.md",
   "README.MD",
+  ".env",
+  ".env.local",
+  ".env.development",
+  "devhub.yml",
+  "devhub.yaml",
 ] as const;
 
 async function exists(filePath: string) {
@@ -180,7 +185,7 @@ export async function detectStack(repositoryPath: string) {
       addTechnology(technologies, { name: packageManager, tone: "orange" });
       capabilities.packageManager = packageManager;
 
-      for (const script of ["dev", "test", "lint", "build"] satisfies ProjectScript[]) {
+      for (const script of ["dev", "start", "test", "lint", "build"] satisfies ProjectScript[]) {
         if (packageJson.scripts?.[script]) {
           capabilities.packageScripts.push(script);
           commands.push({ label: script, command: `${packageManager} ${packageManager === "npm" ? "run " : ""}${script}` });
@@ -221,6 +226,16 @@ export async function detectStack(repositoryPath: string) {
       { label: "test", command: `${wrapper} test` },
       { label: "verify", command: `${wrapper} verify` },
     );
+
+    try {
+      const springConfigurationFiles = (await readdir(path.join(/* turbopackIgnore: true */ repositoryPath, "src", "main", "resources")))
+        .filter((file) => /^application(?:-[A-Za-z0-9_-]+)?\.(?:properties|ya?ml)$/.test(file))
+        .sort()
+        .map((file) => `src/main/resources/${file}`);
+      configurationFiles.push(...springConfigurationFiles);
+    } catch {
+      // Spring configuration discovery is informational and must not block scanning.
+    }
   }
 
   if (await exists(path.join(/* turbopackIgnore: true */ repositoryPath, "Dockerfile"))) {

@@ -5,7 +5,10 @@ import type { Readable } from "node:stream";
 import net from "node:net";
 import { promisify } from "node:util";
 
-import type { DevServerStatus, RepositoryActionResult } from "./action-types";
+import type { DevServerStatus, NodeLaunchMode, RepositoryActionResult } from "./action-types";
+import { resolveNodeRuntime } from "./node-runtime";
+import { classifySpringFailureOutput, redactRuntimeOutput } from "./runtime-config";
+import { resolveSpringRuntime } from "./runtime-profile";
 import type { PackageManager, Repository } from "@/lib/workspace/types";
 
 const STARTUP_WAIT_MS = 8_000;
@@ -24,11 +27,13 @@ type ManagedProcess = {
   child: ChildProcessByStdio<null, Readable, Readable>;
   repositoryId: string;
   runtimeKind: "node" | "spring-boot";
+  launchMode: NodeLaunchMode | null;
   startedAt: string;
   port: number | null;
   rootProcess: WindowsProcessIdentity | null;
   listenerProcess: WindowsProcessIdentity | null;
   output: string;
+  redactions: string[];
   stopping: boolean;
 };
 
@@ -54,7 +59,7 @@ function cleanOutput(value: string) {
 }
 
 function appendOutput(entry: ManagedProcess, chunk: Buffer | string) {
-  entry.output = cleanOutput(`${entry.output}${chunk.toString()}`).slice(-MAX_OUTPUT_CHARS);
+  entry.output = redactRuntimeOutput(cleanOutput(`${entry.output}${chunk.toString()}`), entry.redactions).slice(-MAX_OUTPUT_CHARS);
   const matches = [...entry.output.matchAll(/https?:\/\/(?:localhost|127\.0\.0\.1):([0-9]{1,5})/gi)];
   const detected = Number(matches.at(-1)?.[1]);
   if (detected >= 1 && detected <= 65_535 && entry.port !== detected) {
@@ -68,22 +73,20 @@ function outputExcerpt(output: string) {
   return output.trim().split("\n").slice(-40).join("\n");
 }
 
-function packageCommand(packageManager: PackageManager, script: "dev") {
+function packageCommand(packageManager: PackageManager, script: "dev" | "build" | "start") {
   const executable = `${packageManager}${process.platform === "win32" ? ".cmd" : ""}`;
   return { executable, args: packageManager === "npm" ? ["run", script] : [script] };
 }
 
-function spawnPackageScript(repository: Repository, port: number): ChildProcessByStdio<null, Readable, Readable> {
+function spawnPackageScript(repository: Repository, script: "dev" | "build" | "start", environment: NodeJS.ProcessEnv): ChildProcessByStdio<null, Readable, Readable> {
   const packageManager = repository.capabilities.packageManager;
   if (!packageManager) throw new Error("No supported package manager was detected.");
-  const command = packageCommand(packageManager, "dev");
-  const childEnvironment: NodeJS.ProcessEnv = { ...process.env, NODE_ENV: "development", NO_COLOR: "1", FORCE_COLOR: "0" };
-  childEnvironment.PORT = String(port);
+  const command = packageCommand(packageManager, script);
 
   if (process.platform === "win32") {
     return spawn(/* turbopackIgnore: true */ process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe", ["/d", "/s", "/c", command.executable, ...command.args], {
       cwd: repository.path,
-      env: childEnvironment,
+      env: environment,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
     });
@@ -91,12 +94,12 @@ function spawnPackageScript(repository: Repository, port: number): ChildProcessB
 
   return spawn(/* turbopackIgnore: true */ command.executable, command.args, {
     cwd: repository.path,
-    env: childEnvironment,
+    env: environment,
     stdio: ["ignore", "pipe", "pipe"],
   });
 }
 
-async function spawnSpringBoot(repository: Repository, port: number): Promise<ChildProcessByStdio<null, Readable, Readable>> {
+async function spawnSpringBoot(repository: Repository, port: number, resolvedEnvironment: NodeJS.ProcessEnv): Promise<ChildProcessByStdio<null, Readable, Readable>> {
   let executable: string;
   if (repository.capabilities.hasMavenWrapper) {
     executable = process.platform === "win32" ? ".\\mvnw.cmd" : "./mvnw";
@@ -114,7 +117,7 @@ async function spawnSpringBoot(repository: Repository, port: number): Promise<Ch
 
   const args = ["spring-boot:run", `-Dspring-boot.run.arguments=--server.port=${port}`];
   const inheritedEnvironment = Object.fromEntries(
-    Object.entries(process.env).filter(([name]) => name !== "PORT" && name !== "NODE_ENV"),
+    Object.entries(resolvedEnvironment).filter(([name]) => name !== "PORT" && name !== "NODE_ENV"),
   ) as NodeJS.ProcessEnv;
   const environment: NodeJS.ProcessEnv = {
     ...inheritedEnvironment,
@@ -264,10 +267,11 @@ async function finalizeExitedEntry(entry: ManagedProcess, exitCode: number | nul
 
   runtime.processes.delete(entry.repositoryId);
   if (entry.port) runtime.reservedPorts.delete(entry.port);
-  const processName = entry.runtimeKind === "spring-boot" ? "Backend" : "Dev server";
+  const processName = entry.runtimeKind === "spring-boot" ? "Backend" : entry.launchMode === "preview" ? "Preview server" : "Dev server";
+  const classifiedMessage = entry.runtimeKind === "spring-boot" ? classifySpringFailureOutput(entry.output) : null;
   runtime.lastStatus.set(
     entry.repositoryId,
-    statusForEntry(entry, entry.stopping ? "stopped" : "failed", entry.stopping ? "Stopped" : `${processName} exited with code ${exitCode ?? "unknown"}.`),
+    statusForEntry(entry, entry.stopping ? "stopped" : "failed", entry.stopping ? "Stopped" : classifiedMessage ?? `${processName} exited unexpectedly (code ${exitCode ?? "unknown"}).`),
   );
 }
 
@@ -281,6 +285,7 @@ function statusForEntry(entry: ManagedProcess, state: DevServerStatus["state"], 
     startedAt: entry.startedAt,
     message,
     output: outputExcerpt(entry.output) || undefined,
+    launchMode: entry.launchMode,
   };
 }
 
@@ -313,6 +318,7 @@ export async function detectRunningDevServer(repository: Repository): Promise<De
       url: `http://localhost:${port}`,
       startedAt: null,
       message: `Port ${port} is already in use. DevHub will not claim or stop that process.`,
+      launchMode: null,
     };
   }
 
@@ -323,14 +329,61 @@ export async function detectRunningDevServer(repository: Repository): Promise<De
     url: null,
     startedAt: null,
     message: "Stopped",
+    launchMode: null,
   };
 }
 
-async function startDevServerOnce(repository: Repository): Promise<RepositoryActionResult> {
+async function runNodeBuild(repository: Repository, environment: NodeJS.ProcessEnv, redactions: string[]) {
+  const child = spawnPackageScript(repository, "build", environment);
+  let output = "";
+  const append = (chunk: Buffer | string) => {
+    output = redactRuntimeOutput(cleanOutput(`${output}${chunk.toString()}`), redactions).slice(-MAX_OUTPUT_CHARS);
+  };
+  child.stdout.on("data", append);
+  child.stderr.on("data", append);
+
+  return new Promise<{ ok: boolean; exitCode: number | null; output: string; message: string }>((resolve) => {
+    let settled = false;
+    const finish = (result: { ok: boolean; exitCode: number | null; message: string }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timeout);
+      resolve({ ...result, output: outputExcerpt(output) });
+    };
+    const timeout = setTimeout(() => {
+      if (process.platform === "win32" && child.pid) {
+        void execFileAsync("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], { windowsHide: true });
+      } else {
+        child.kill("SIGTERM");
+      }
+      finish({ ok: false, exitCode: child.exitCode, message: "The production build timed out after five minutes." });
+    }, 300_000);
+    child.once("error", (error) => {
+      append(error.message);
+      finish({ ok: false, exitCode: child.exitCode, message: "The production build could not be started." });
+    });
+    child.once("close", (exitCode) => finish({
+      ok: exitCode === 0,
+      exitCode,
+      message: exitCode === 0 ? "Production build completed." : `Production build failed (exit ${exitCode ?? "unknown"}).`,
+    }));
+  });
+}
+
+async function startDevServerOnce(repository: Repository, launchMode: NodeLaunchMode): Promise<RepositoryActionResult> {
   const runtimeKind = repository.capabilities.hasSpringBoot ? "spring-boot" : "node";
+  if (runtimeKind === "spring-boot" && launchMode === "preview") {
+    return { status: "error", message: "Preview mode is available for detected Next.js runtimes." };
+  }
   const hasNodeDevScript = repository.capabilities.packageScripts.includes("dev") && Boolean(repository.capabilities.packageManager);
-  if (runtimeKind === "node" && !hasNodeDevScript) {
+  const hasNodePreviewScripts = repository.capabilities.packageScripts.includes("build")
+    && repository.capabilities.packageScripts.includes("start")
+    && Boolean(repository.capabilities.packageManager);
+  if (runtimeKind === "node" && launchMode === "dev" && !hasNodeDevScript) {
     return { status: "error", message: "This repository does not expose a supported development runtime." };
+  }
+  if (runtimeKind === "node" && launchMode === "preview" && !hasNodePreviewScripts) {
+    return { status: "error", message: "Preview requires detected build and start scripts." };
   }
 
   const current = await detectRunningDevServer(repository);
@@ -338,39 +391,79 @@ async function startDevServerOnce(repository: Repository): Promise<RepositoryAct
     return { status: "running", message: "Already running from DevHub.", devServer: current };
   }
 
-  const preferredPort = repository.capabilities.devPortHint ?? (runtimeKind === "spring-boot" ? 8080 : 3000);
+  const springRuntime = runtimeKind === "spring-boot" ? await resolveSpringRuntime(repository) : null;
+  const nodeRuntime = runtimeKind === "node" ? await resolveNodeRuntime(repository, launchMode) : null;
+  if (springRuntime && !springRuntime.status.canStart) {
+    return { status: "error", message: springRuntime.status.message ?? "Local prerequisites are not ready.", springRuntime: springRuntime.status };
+  }
+
+  const preferredPort = springRuntime?.preferredPort ?? repository.capabilities.devPortHint ?? (runtimeKind === "spring-boot" ? 8080 : 3000);
   const port = await findAvailablePort(preferredPort);
   if (!port) {
     return {
       status: "error",
-      message: `No free development port was found from ${preferredPort} through ${Math.min(preferredPort + PORT_SEARCH_RANGE_SIZE - 1, 65_535)}.`,
+      message: `No free local port was found from ${preferredPort} through ${Math.min(preferredPort + PORT_SEARCH_RANGE_SIZE - 1, 65_535)}.`,
       devServer: current.state === "port-in-use" ? current : undefined,
+      springRuntime: springRuntime?.status,
+      nodeRuntime: nodeRuntime?.status,
     };
   }
 
   const startedAt = new Date().toISOString();
   runtime.reservedPorts.add(port);
+  let initialOutput = "";
+  if (runtimeKind === "node" && launchMode === "preview" && nodeRuntime) {
+    let build: Awaited<ReturnType<typeof runNodeBuild>>;
+    try {
+      build = await runNodeBuild(repository, nodeRuntime.environment, nodeRuntime.redactions);
+    } catch (error) {
+      runtime.reservedPorts.delete(port);
+      return {
+        status: "error",
+        message: error instanceof Error ? error.message : "The production build could not be started.",
+        nodeRuntime: nodeRuntime.status,
+      };
+    }
+    initialOutput = build.output;
+    if (!build.ok) {
+      runtime.reservedPorts.delete(port);
+      return {
+        status: "error",
+        message: build.message,
+        exitCode: build.exitCode,
+        output: build.output || undefined,
+        nodeRuntime: nodeRuntime.status,
+      };
+    }
+  }
   let child: ChildProcessByStdio<null, Readable, Readable>;
   try {
     child = runtimeKind === "spring-boot"
-      ? await spawnSpringBoot(repository, port)
-      : spawnPackageScript(repository, port);
+      ? await spawnSpringBoot(repository, port, springRuntime?.environment ?? process.env)
+      : spawnPackageScript(repository, launchMode === "preview" ? "start" : "dev", {
+          ...nodeRuntime!.environment,
+          PORT: String(port),
+        } as NodeJS.ProcessEnv);
   } catch (error) {
     runtime.reservedPorts.delete(port);
     return {
       status: "error",
       message: error instanceof Error ? error.message : "The allowlisted development command could not be started.",
+      springRuntime: springRuntime?.status,
+      nodeRuntime: nodeRuntime?.status,
     };
   }
   const entry: ManagedProcess = {
     child,
     repositoryId: repository.id,
     runtimeKind,
+    launchMode: runtimeKind === "node" ? launchMode : null,
     startedAt,
     port,
     rootProcess: null,
     listenerProcess: null,
-    output: "",
+    output: initialOutput,
+    redactions: springRuntime?.redactions ?? nodeRuntime?.redactions ?? [],
     stopping: false,
   };
   runtime.processes.set(repository.id, entry);
@@ -395,20 +488,20 @@ async function startDevServerOnce(repository: Repository): Promise<RepositoryAct
   while (Date.now() < deadline) {
     if (!runtime.processes.has(repository.id)) {
       const failed = runtime.lastStatus.get(repository.id) ?? await detectRunningDevServer(repository);
-      return { status: "error", message: failed.message, exitCode: child.exitCode, output: failed.output, devServer: failed };
+      return { status: "error", message: failed.message, exitCode: child.exitCode, output: failed.output, devServer: failed, springRuntime: springRuntime?.status, nodeRuntime: nodeRuntime?.status };
     }
     if (entry.port && await isPortListening(entry.port)) {
       if (process.platform === "win32" && !await captureWindowsOwnership(entry)) {
         const uncertain = statusForEntry(entry, "starting", "The local port opened, but DevHub could not verify that the listener belongs to its process tree.");
-        return { status: "error", message: uncertain.message, output: uncertain.output, devServer: uncertain };
+        return { status: "error", message: uncertain.message, output: uncertain.output, devServer: uncertain, springRuntime: springRuntime?.status };
       }
       const running = statusForEntry(entry, "running", `Running on localhost:${entry.port}`);
-      return { status: "running", message: running.message, output: running.output, devServer: running };
+      return { status: "running", message: running.message, output: running.output, devServer: running, springRuntime: springRuntime?.status, nodeRuntime: nodeRuntime?.status };
     }
     if (child.exitCode !== null || child.signalCode !== null) {
       await finalizeExitedEntry(entry, child.exitCode);
       const failed = runtime.lastStatus.get(repository.id) ?? await detectRunningDevServer(repository);
-      return { status: "error", message: failed.message, exitCode: child.exitCode, output: failed.output, devServer: failed };
+      return { status: "error", message: failed.message, exitCode: child.exitCode, output: failed.output, devServer: failed, springRuntime: springRuntime?.status, nodeRuntime: nodeRuntime?.status };
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
@@ -420,14 +513,22 @@ async function startDevServerOnce(repository: Repository): Promise<RepositoryAct
       ? "DevHub started the backend; waiting for its local port."
       : "DevHub started the process; waiting for a local URL.",
   );
-  return { status: "running", message: starting.message, output: starting.output, devServer: starting };
+  return { status: "running", message: starting.message, output: starting.output, devServer: starting, springRuntime: springRuntime?.status, nodeRuntime: nodeRuntime?.status };
 }
 
 export function startDevServer(repository: Repository): Promise<RepositoryActionResult> {
+  return startServer(repository, "dev");
+}
+
+export function startPreviewServer(repository: Repository): Promise<RepositoryActionResult> {
+  return startServer(repository, "preview");
+}
+
+function startServer(repository: Repository, launchMode: NodeLaunchMode): Promise<RepositoryActionResult> {
   const inFlight = runtime.starts.get(repository.id);
   if (inFlight) return inFlight;
 
-  const start = startDevServerOnce(repository).finally(() => {
+  const start = startDevServerOnce(repository, launchMode).finally(() => {
     if (runtime.starts.get(repository.id) === start) runtime.starts.delete(repository.id);
   });
   runtime.starts.set(repository.id, start);
@@ -464,6 +565,7 @@ export async function stopDevServer(repository: Repository): Promise<RepositoryA
           url: entry.port ? `http://localhost:${entry.port}` : null,
           startedAt: null,
           message: "DevHub could not verify ownership of the listening process, so it was not stopped.",
+          launchMode: null,
         };
         return { status: "error", message: uncertain.message, output: outputExcerpt(entry.output), devServer: uncertain };
       }
@@ -539,7 +641,7 @@ export async function stopDevServer(repository: Repository): Promise<RepositoryA
   runtime.lastStatus.set(repository.id, stopped);
   return {
     status: "stopped",
-    message: entry.runtimeKind === "spring-boot" ? "DevHub stopped its backend." : "DevHub stopped its dev process.",
+    message: entry.runtimeKind === "spring-boot" ? "DevHub stopped its backend." : entry.launchMode === "preview" ? "DevHub stopped its preview process." : "DevHub stopped its dev process.",
     output: stopped.output,
     devServer: stopped,
   };

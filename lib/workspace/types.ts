@@ -22,7 +22,7 @@ export type ProjectCommand = {
 };
 
 export type PackageManager = "pnpm" | "npm" | "yarn";
-export type ProjectScript = "dev" | "test" | "lint" | "build";
+export type ProjectScript = "dev" | "start" | "test" | "lint" | "build";
 
 export type ProjectCapabilities = {
   packageManager: PackageManager | null;

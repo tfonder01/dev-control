@@ -6,13 +6,15 @@ import type { NewProjectState, RefreshWorkspaceState } from "./action-state";
 import type { RepositoryAction, RepositoryActionResult } from "@/lib/projects/action-types";
 import { openInCursor, openInExplorer, openInIntelliJ, openTerminal, runProjectCheck } from "@/lib/projects/actions";
 import { initializeProject, prepareDestinationCategory } from "@/lib/projects/operations";
-import { startDevServer, stopDevServer } from "@/lib/projects/processes";
+import { startDependencies, stopDependencies } from "@/lib/projects/dependencies";
+import { startDevServer, startPreviewServer, stopDevServer } from "@/lib/projects/processes";
 import { resolveSafeDestination, type ProjectType, validateGithubUrl } from "@/lib/projects/validation";
 import { getRepositoryFromSnapshot, refreshWorkspaceSnapshot } from "@/lib/workspace/snapshot";
 
 const REPOSITORY_ACTIONS = new Set<RepositoryAction>([
   "open-cursor", "open-intellij", "open-explorer", "open-terminal",
-  "start-dev", "stop-dev",
+  "start-dev", "start-preview", "stop-dev",
+  "start-dependencies", "stop-dependencies",
   "run-test", "run-lint", "run-build", "run-verify",
 ]);
 
@@ -114,7 +116,10 @@ export async function runRepositoryAction(repositoryId: string, action: Reposito
     case "open-explorer": return openInExplorer(repository);
     case "open-terminal": return openTerminal(repository);
     case "start-dev": return startDevServer(repository);
+    case "start-preview": return startPreviewServer(repository);
     case "stop-dev": return stopDevServer(repository);
+    case "start-dependencies": return startDependencies(repository);
+    case "stop-dependencies": return stopDependencies(repository);
     case "run-test": return runProjectCheck(repository, "test");
     case "run-lint": return runProjectCheck(repository, "lint");
     case "run-build": return runProjectCheck(repository, "build");
