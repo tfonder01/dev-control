@@ -3,10 +3,10 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: {
-    default: "Dev Control",
-    template: "%s · Dev Control",
+    default: "DevHub",
+    template: "%s · DevHub",
   },
-  description: "A local dashboard for your development workspace.",
+  description: "A local dashboard for inspecting and operating your development workspace.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

@@ -3,9 +3,18 @@
 import { revalidatePath } from "next/cache";
 
 import type { NewProjectState, RefreshWorkspaceState } from "./action-state";
+import type { RepositoryAction, RepositoryActionResult } from "@/lib/projects/action-types";
+import { openInCursor, openInExplorer, openInIntelliJ, openTerminal, runProjectCheck } from "@/lib/projects/actions";
 import { initializeProject, prepareDestinationCategory } from "@/lib/projects/operations";
+import { startDevServer, stopDevServer } from "@/lib/projects/processes";
 import { resolveSafeDestination, type ProjectType, validateGithubUrl } from "@/lib/projects/validation";
-import { refreshWorkspaceSnapshot } from "@/lib/workspace/snapshot";
+import { getRepositoryFromSnapshot, refreshWorkspaceSnapshot } from "@/lib/workspace/snapshot";
+
+const REPOSITORY_ACTIONS = new Set<RepositoryAction>([
+  "open-cursor", "open-intellij", "open-explorer", "open-terminal",
+  "start-dev", "stop-dev",
+  "run-test", "run-lint", "run-build", "run-verify",
+]);
 
 export async function refreshWorkspaceAction(): Promise<RefreshWorkspaceState> {
   try {
@@ -88,5 +97,27 @@ export async function createProjectAction(
     return { status: "success", message: `${projectName.trim()} is ready.${skipped}` };
   } catch (error) {
     return { status: "error", message: safeOperationError(error) };
+  }
+}
+
+export async function runRepositoryAction(repositoryId: string, action: RepositoryAction): Promise<RepositoryActionResult> {
+  if (!REPOSITORY_ACTIONS.has(action) || !/^[A-Za-z0-9_-]{16}$/.test(repositoryId)) {
+    return { status: "error", message: "That repository action is not available." };
+  }
+
+  const repository = await getRepositoryFromSnapshot(repositoryId);
+  if (!repository) return { status: "error", message: "The repository is no longer in the workspace snapshot. Refresh the dashboard and try again." };
+
+  switch (action) {
+    case "open-cursor": return openInCursor(repository);
+    case "open-intellij": return openInIntelliJ(repository);
+    case "open-explorer": return openInExplorer(repository);
+    case "open-terminal": return openTerminal(repository);
+    case "start-dev": return startDevServer(repository);
+    case "stop-dev": return stopDevServer(repository);
+    case "run-test": return runProjectCheck(repository, "test");
+    case "run-lint": return runProjectCheck(repository, "lint");
+    case "run-build": return runProjectCheck(repository, "build");
+    case "run-verify": return runProjectCheck(repository, "verify");
   }
 }

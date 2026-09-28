@@ -116,6 +116,7 @@ export async function scanWorkspace(): Promise<WorkspaceScanResult> {
       technologies: stack.technologies,
       configurationFiles: stack.configurationFiles,
       commands: stack.commands,
+      capabilities: stack.capabilities,
       git,
     };
   });

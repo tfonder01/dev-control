@@ -1,9 +1,11 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { connection } from "next/server";
-import { ArrowLeft, Box, Check, ExternalLink, FileCode2, FolderGit2, GitBranch, GitCommitHorizontal, ListTree, Terminal } from "lucide-react";
+import { ArrowLeft, Box, Check, FileCode2, FolderGit2, GitBranch, GitCommitHorizontal, ListTree, Terminal } from "lucide-react";
 
 import { formatActivity, PageShell, RepositoryState, TechnologyBadge } from "@/app/components";
+import { ProjectActionsPanel } from "@/app/project-actions-panel";
+import { detectRunningDevServer } from "@/lib/projects/processes";
 import { getRepositoryFromSnapshot } from "@/lib/workspace/snapshot";
 
 export default async function ProjectPage({ params }: { params: Promise<{ id: string }> }) {
@@ -11,13 +13,14 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
   const { id } = await params;
   const repository = await getRepositoryFromSnapshot(id);
   if (!repository) notFound();
+  const devServer = await detectRunningDevServer(repository);
 
   return (
     <PageShell>
       <header className="site-header detail-header">
         <Link href="/" className="back-link"><ArrowLeft aria-hidden="true" size={16} /> Workspace</Link>
         <span className="header-divider" />
-        <span className="detail-product">Dev Control</span>
+        <span className="detail-product">DevHub</span>
       </header>
 
       <section className="detail-hero">
@@ -33,6 +36,14 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
 
       <div className="detail-path" title={repository.path}>{repository.path}</div>
 
+      <ProjectActionsPanel
+        repositoryId={repository.id}
+        githubUrl={repository.git.githubUrl}
+        technologies={repository.technologies.map((technology) => technology.name)}
+        capabilities={repository.capabilities}
+        initialDevServer={devServer}
+      />
+
       <section className="detail-grid">
         <div className="detail-card detail-card-wide">
           <div className="card-heading"><Box aria-hidden="true" size={16} /><h2>Repository</h2></div>
@@ -41,11 +52,6 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
             <div><dt>Stack</dt><dd className="tech-list">{repository.technologies.length > 0 ? repository.technologies.map((technology) => <TechnologyBadge key={technology.name} technology={technology} />) : <span className="muted">Not detected</span>}</dd></div>
             <div><dt>Origin</dt><dd className="break-value">{repository.git.originUrl ?? "No origin configured"}</dd></div>
           </dl>
-          {repository.git.githubUrl && (
-            <a className="github-link" href={repository.git.githubUrl} target="_blank" rel="noreferrer">
-              Open GitHub <ExternalLink aria-hidden="true" size={14} />
-            </a>
-          )}
         </div>
 
         <div className="detail-card">
@@ -82,7 +88,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
           {repository.commands.length > 0 ? (
             <ul className="command-list">{repository.commands.map((command) => <li key={`${command.label}-${command.command}`}><span>{command.label}</span><code>{command.command}</code></li>)}</ul>
           ) : <p className="muted">No common project commands detected.</p>}
-          <p className="card-note">Informational only. Commands are never executed by Dev Control.</p>
+          <p className="card-note">Detected commands are informational. DevHub runs only the allowlisted actions above.</p>
         </div>
 
         <div className="detail-card detail-card-full">

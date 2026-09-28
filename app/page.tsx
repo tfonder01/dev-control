@@ -25,7 +25,7 @@ export default async function Home() {
       <header className="site-header">
         <div className="brand-mark"><TerminalSquare aria-hidden="true" size={18} /></div>
         <div>
-          <div className="brand-name">Dev Control</div>
+          <div className="brand-name">DevHub</div>
           <div className="brand-kicker"><span className="live-dot" /> Local workspace</div>
         </div>
         {!workspace.error && <div className="header-action"><NewProjectDialog key={workspace.scannedAt} categories={categories} /></div>}
@@ -83,7 +83,7 @@ export default async function Home() {
         </>
       )}
 
-      <footer><GitCommitHorizontal aria-hidden="true" size={14} /> Read-only workspace inspection</footer>
+      <footer><GitCommitHorizontal aria-hidden="true" size={14} /> Local workspace operations</footer>
     </PageShell>
   );
 }

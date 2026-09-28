@@ -21,6 +21,18 @@ export type ProjectCommand = {
   command: string;
 };
 
+export type PackageManager = "pnpm" | "npm" | "yarn";
+export type ProjectScript = "dev" | "test" | "lint" | "build";
+
+export type ProjectCapabilities = {
+  packageManager: PackageManager | null;
+  packageScripts: ProjectScript[];
+  hasMavenWrapper: boolean;
+  hasSpringBoot: boolean;
+  devPortHint: number | null;
+  devPortSource: "script" | "spring-config" | "framework-default" | null;
+};
+
 export type Repository = {
   id: string;
   name: string;
@@ -29,6 +41,7 @@ export type Repository = {
   technologies: Technology[];
   configurationFiles: string[];
   commands: ProjectCommand[];
+  capabilities: ProjectCapabilities;
   git: GitMetadata;
 };
 
