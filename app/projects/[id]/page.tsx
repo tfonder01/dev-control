@@ -5,7 +5,10 @@ import { ArrowLeft, Box, Check, FileCode2, FolderGit2, GitBranch, GitCommitHoriz
 
 import { formatActivity, PageShell, RepositoryState, TechnologyBadge } from "@/app/components";
 import { ProjectActionsPanel } from "@/app/project-actions-panel";
+import { ProjectLinksPanel } from "@/app/project-links-panel";
 import { getDependencyStatus } from "@/lib/projects/dependencies";
+import { detectProjectLinks } from "@/lib/projects/project-link-detection";
+import { getProjectLinks, resolveProjectLinks } from "@/lib/projects/project-links";
 import { detectRunningDevServer } from "@/lib/projects/processes";
 import { resolveNodeRuntimeProfiles } from "@/lib/projects/node-runtime";
 import { resolveSpringRuntime } from "@/lib/projects/runtime-profile";
@@ -17,11 +20,13 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
   const repository = await getRepositoryFromSnapshot(id);
   if (!repository) notFound();
   const isNextJs = repository.technologies.some((technology) => technology.name === "Next.js");
-  const [devServer, springRuntime, dependencies, nodeRuntimes] = await Promise.all([
+  const [devServer, springRuntime, dependencies, nodeRuntimes, projectLinksConfig, detectedProjectLinks] = await Promise.all([
     detectRunningDevServer(repository),
     repository.capabilities.hasSpringBoot ? resolveSpringRuntime(repository).then((runtime) => runtime.status) : null,
     repository.capabilities.hasSpringBoot ? getDependencyStatus(repository) : null,
     isNextJs ? resolveNodeRuntimeProfiles(repository) : null,
+    getProjectLinks(repository.id),
+    detectProjectLinks(repository),
   ]);
 
   return (
@@ -45,9 +50,14 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
 
       <div className="detail-path" title={repository.path}>{repository.path}</div>
 
+      <ProjectLinksPanel
+        repositoryId={repository.id}
+        initialConfig={projectLinksConfig}
+        initialLinks={resolveProjectLinks(projectLinksConfig, detectedProjectLinks)}
+      />
+
       <ProjectActionsPanel
         repositoryId={repository.id}
-        githubUrl={repository.git.githubUrl}
         technologies={repository.technologies.map((technology) => technology.name)}
         capabilities={repository.capabilities}
         initialDevServer={devServer}

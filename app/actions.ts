@@ -6,6 +6,10 @@ import type { NewProjectState, RefreshWorkspaceState } from "./action-state";
 import type { RepositoryAction, RepositoryActionResult } from "@/lib/projects/action-types";
 import { openInCursor, openInExplorer, openInIntelliJ, openTerminal, runProjectCheck } from "@/lib/projects/actions";
 import { initializeProject, prepareDestinationCategory } from "@/lib/projects/operations";
+import { detectProjectLinks } from "@/lib/projects/project-link-detection";
+import { resolveProjectLinks, resolveWorkspaceLinks, saveProjectLinks, saveWorkspaceLinks } from "@/lib/projects/project-links";
+import type { ProjectLinksActionResult, WorkspaceLinksActionResult } from "@/lib/projects/project-links-types";
+import { parseProjectLinksForm, parseWorkspaceLinksForm } from "@/lib/projects/project-links-validation";
 import { startDependencies, stopDependencies } from "@/lib/projects/dependencies";
 import { startDevServer, startPreviewServer, stopDevServer } from "@/lib/projects/processes";
 import { resolveSafeDestination, type ProjectType, validateGithubUrl } from "@/lib/projects/validation";
@@ -124,5 +128,50 @@ export async function runRepositoryAction(repositoryId: string, action: Reposito
     case "run-lint": return runProjectCheck(repository, "lint");
     case "run-build": return runProjectCheck(repository, "build");
     case "run-verify": return runProjectCheck(repository, "verify");
+  }
+}
+
+export async function saveProjectLinksAction(repositoryId: string, formData: FormData): Promise<ProjectLinksActionResult> {
+  if (!/^[A-Za-z0-9_-]{16}$/.test(repositoryId)) {
+    return { status: "error", message: "That project is not available." };
+  }
+
+  const repository = await getRepositoryFromSnapshot(repositoryId);
+  if (!repository) {
+    return { status: "error", message: "The repository is no longer in the workspace snapshot. Refresh the dashboard and try again." };
+  }
+
+  const parsed = parseProjectLinksForm(formData);
+  if (!parsed.ok) {
+    return { status: "error", message: "Review the highlighted links.", fieldErrors: parsed.fieldErrors };
+  }
+
+  try {
+    const config = await saveProjectLinks(repositoryId, parsed.config);
+    const detected = await detectProjectLinks(repository);
+    revalidatePath(`/projects/${repositoryId}`);
+    return {
+      status: "success",
+      message: "Project links saved.",
+      config,
+      links: resolveProjectLinks(config, detected),
+    };
+  } catch {
+    return { status: "error", message: "Project links could not be saved. The existing metadata was preserved." };
+  }
+}
+
+export async function saveWorkspaceLinksAction(formData: FormData): Promise<WorkspaceLinksActionResult> {
+  const parsed = parseWorkspaceLinksForm(formData);
+  if (!parsed.ok) {
+    return { status: "error", message: "Review the highlighted links.", fieldErrors: parsed.fieldErrors };
+  }
+
+  try {
+    const config = await saveWorkspaceLinks(parsed.config);
+    revalidatePath("/");
+    return { status: "success", message: "Workspace links saved.", config, links: resolveWorkspaceLinks(config) };
+  } catch {
+    return { status: "error", message: "Workspace links could not be saved. The existing metadata was preserved." };
   }
 }

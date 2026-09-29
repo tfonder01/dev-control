@@ -2,15 +2,17 @@ import { connection } from "next/server";
 import { FolderSearch, GitCommitHorizontal, TerminalSquare } from "lucide-react";
 
 import { getGreeting } from "@/lib/dashboard/greeting";
+import { getWorkspaceLinks, resolveWorkspaceLinks } from "@/lib/projects/project-links";
 import { getWorkspaceSnapshot } from "@/lib/workspace/snapshot";
 import { NewProjectDialog } from "./new-project-dialog";
 import { PageShell } from "./components";
 import { RefreshWorkspaceButton } from "./refresh-workspace-button";
 import { RepositoryBrowser } from "./repository-browser";
+import { WorkspaceLinksPanel } from "./workspace-links-panel";
 
 export default async function Home() {
   await connection();
-  const workspace = await getWorkspaceSnapshot();
+  const [workspace, workspaceLinksConfig] = await Promise.all([getWorkspaceSnapshot(), getWorkspaceLinks()]);
   const modifiedCount = workspace.repositories.filter((repository) => repository.git.isDirty).length;
   const cleanCount = workspace.repositories.filter((repository) => !repository.git.isDirty && !repository.git.error).length;
   const now = new Date();
@@ -58,6 +60,8 @@ export default async function Home() {
             <span>DEV_CONTROL_ROOT</span>
             <code title={workspace.root ?? undefined}>{workspace.root}</code>
           </div>
+
+          <WorkspaceLinksPanel initialConfig={workspaceLinksConfig} initialLinks={resolveWorkspaceLinks(workspaceLinksConfig)} />
 
           <section className="repository-section">
             <div className="section-heading">

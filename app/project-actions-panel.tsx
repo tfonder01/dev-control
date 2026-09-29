@@ -9,7 +9,6 @@ import type { ProjectCapabilities } from "@/lib/workspace/types";
 
 type Props = {
   repositoryId: string;
-  githubUrl: string | null;
   technologies: string[];
   capabilities: ProjectCapabilities;
   initialDevServer: DevServerStatus;
@@ -51,7 +50,7 @@ function ActionButton({ action, activeAction, onRun, icon, label }: {
   );
 }
 
-export function ProjectActionsPanel({ repositoryId, githubUrl, technologies, capabilities, initialDevServer, initialSpringRuntime, initialDependencies, initialNodeRuntimes }: Props) {
+export function ProjectActionsPanel({ repositoryId, technologies, capabilities, initialDevServer, initialSpringRuntime, initialDependencies, initialNodeRuntimes }: Props) {
   const [isPending, startTransition] = useTransition();
   const [activeAction, setActiveAction] = useState<RepositoryAction | null>(null);
   const [result, setResult] = useState<RepositoryActionResult | null>(null);
@@ -139,7 +138,6 @@ export function ProjectActionsPanel({ repositoryId, githubUrl, technologies, cap
             {isJavaProject && <ActionButton action="open-intellij" activeAction={effectiveActiveAction} onRun={run} icon={<Code2 aria-hidden="true" size={14} />} />}
             <ActionButton action="open-cursor" activeAction={effectiveActiveAction} onRun={run} icon={<Wrench aria-hidden="true" size={14} />} />
             <ActionButton action="open-explorer" activeAction={effectiveActiveAction} onRun={run} icon={<FolderOpen aria-hidden="true" size={14} />} />
-            {githubUrl && <a className="project-action-button" href={githubUrl} target="_blank" rel="noreferrer">GitHub <ExternalLink aria-hidden="true" size={13} /></a>}
           </div>
         </div>
 
