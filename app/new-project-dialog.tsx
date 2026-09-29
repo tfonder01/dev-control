@@ -4,7 +4,7 @@ import { useActionState, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { CheckCircle2, FolderPlus, LoaderCircle, Plus, X } from "lucide-react";
 
-import { initialNewProjectState } from "./action-state";
+import { initialNewProjectState, type NewProjectFormValues } from "./action-state";
 import { createProjectAction } from "./actions";
 import type { ProjectType } from "@/lib/projects/validation";
 
@@ -18,7 +18,16 @@ const PROJECT_TYPE_HELP: Record<ProjectType, string> = {
 export function NewProjectDialog({ categories }: { categories: string[] }) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const router = useRouter();
-  const [projectType, setProjectType] = useState<ProjectType>("existing");
+  const [values, setValues] = useState<NewProjectFormValues>({
+    githubUrl: "",
+    projectName: "",
+    category: "",
+    projectType: "existing",
+    addReadme: false,
+    addAgents: false,
+    addClaude: false,
+    useEngineeringStandards: false,
+  });
   const [state, formAction, pending] = useActionState(createProjectAction, initialNewProjectState);
 
   useEffect(() => {
@@ -59,19 +68,19 @@ export function NewProjectDialog({ categories }: { categories: string[] }) {
           <form action={formAction} className="project-form">
             <div className="form-field form-field-full">
               <label htmlFor="githubUrl">GitHub repository URL</label>
-              <input id="githubUrl" name="githubUrl" type="url" required autoComplete="off" placeholder="https://github.com/owner/repository" aria-describedby={state.fieldErrors?.githubUrl ? "githubUrl-error" : undefined} />
+              <input id="githubUrl" name="githubUrl" type="url" required autoComplete="off" placeholder="https://github.com/owner/repository" value={values.githubUrl} onChange={(event) => setValues((current) => ({ ...current, githubUrl: event.target.value }))} aria-describedby={state.fieldErrors?.githubUrl ? "githubUrl-error" : undefined} />
               {state.fieldErrors?.githubUrl && <span className="field-error" id="githubUrl-error">{state.fieldErrors.githubUrl}</span>}
             </div>
 
             <div className="form-field">
               <label htmlFor="projectName">Local project name</label>
-              <input id="projectName" name="projectName" required maxLength={80} autoComplete="off" placeholder="my-project" aria-describedby={state.fieldErrors?.projectName ? "projectName-error" : undefined} />
+              <input id="projectName" name="projectName" required maxLength={80} autoComplete="off" placeholder="my-project" value={values.projectName} onChange={(event) => setValues((current) => ({ ...current, projectName: event.target.value }))} aria-describedby={state.fieldErrors?.projectName ? "projectName-error" : undefined} />
               {state.fieldErrors?.projectName && <span className="field-error" id="projectName-error">{state.fieldErrors.projectName}</span>}
             </div>
 
             <div className="form-field">
               <label htmlFor="category">Destination category</label>
-              <input id="category" name="category" list="workspace-categories" autoComplete="off" placeholder="Internal Products" aria-describedby={state.fieldErrors?.category ? "category-error" : "category-help"} />
+              <input id="category" name="category" list="workspace-categories" autoComplete="off" placeholder="Internal Products" value={values.category} onChange={(event) => setValues((current) => ({ ...current, category: event.target.value }))} aria-describedby={state.fieldErrors?.category ? "category-error" : "category-help"} />
               <datalist id="workspace-categories">{categories.map((category) => <option value={category} key={category} />)}</datalist>
               <span className="field-help" id="category-help">Relative to DEV_CONTROL_ROOT. Leave blank for the root.</span>
               {state.fieldErrors?.category && <span className="field-error" id="category-error">{state.fieldErrors.category}</span>}
@@ -79,7 +88,7 @@ export function NewProjectDialog({ categories }: { categories: string[] }) {
 
             <div className="form-field">
               <label htmlFor="projectType">Project type</label>
-              <select id="projectType" name="projectType" value={projectType} onChange={(event) => setProjectType(event.target.value as ProjectType)}>
+              <select id="projectType" name="projectType" value={values.projectType} onChange={(event) => setValues((current) => ({ ...current, projectType: event.target.value as ProjectType }))}>
                 <option value="existing">Existing repo only</option>
                 <option value="nextjs">Next.js</option>
                 <option value="spring-boot">Spring Boot</option>
@@ -94,21 +103,21 @@ export function NewProjectDialog({ categories }: { categories: string[] }) {
               <span className="field-help">Used for Node.js and Next.js projects.</span>
             </div>
 
-            <p className="type-help form-field-full">{PROJECT_TYPE_HELP[projectType]}</p>
+            <p className="type-help form-field-full">{PROJECT_TYPE_HELP[values.projectType]}</p>
 
             <fieldset className="setup-options form-field-full">
               <legend>Optional setup</legend>
-              <label><input type="checkbox" name="addReadme" /> <span>Add README</span></label>
-              <label><input type="checkbox" name="addAgents" /> <span>Add AGENTS.md</span></label>
-              <label><input type="checkbox" name="addClaude" /> <span>Add CLAUDE.md</span></label>
-              <label><input type="checkbox" name="useEngineeringStandards" /> <span>Use engineering standards</span></label>
+              <label><input type="checkbox" name="addReadme" checked={values.addReadme} onChange={(event) => setValues((current) => ({ ...current, addReadme: event.target.checked }))} /> <span>Add README</span></label>
+              <label><input type="checkbox" name="addAgents" checked={values.addAgents} onChange={(event) => setValues((current) => ({ ...current, addAgents: event.target.checked }))} /> <span>Add AGENTS.md</span></label>
+              <label><input type="checkbox" name="addClaude" checked={values.addClaude} onChange={(event) => setValues((current) => ({ ...current, addClaude: event.target.checked }))} /> <span>Add CLAUDE.md</span></label>
+              <label><input type="checkbox" name="useEngineeringStandards" checked={values.useEngineeringStandards} onChange={(event) => setValues((current) => ({ ...current, useEngineeringStandards: event.target.checked }))} /> <span>Use engineering standards</span></label>
             </fieldset>
 
             {state.message && <div className="form-message" role="alert">{state.message}</div>}
 
             <div className="dialog-actions form-field-full">
               <button className="secondary-button" type="button" onClick={closeDialog} disabled={pending}>Cancel</button>
-              <button className="primary-button" type="submit" disabled={pending || projectType === "spring-boot"}>
+              <button className="primary-button" type="submit" disabled={pending || values.projectType === "spring-boot"}>
                 {pending ? <><LoaderCircle className="spin" aria-hidden="true" size={15} /> Initializing…</> : "Initialize project"}
               </button>
             </div>

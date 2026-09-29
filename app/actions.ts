@@ -47,19 +47,29 @@ export async function createProjectAction(
   _previousState: NewProjectState,
   formData: FormData,
 ): Promise<NewProjectState> {
-  const workspaceRoot = process.env.DEV_CONTROL_ROOT?.trim();
-  if (!workspaceRoot) return { status: "error", message: "DEV_CONTROL_ROOT is not configured." };
-
   const githubUrl = value(formData, "githubUrl");
   const projectName = value(formData, "projectName");
   const category = value(formData, "category");
-  const projectType = value(formData, "projectType") as ProjectType;
+  const rawProjectType = value(formData, "projectType");
   const allowedProjectTypes: ProjectType[] = ["existing", "nextjs", "spring-boot", "empty"];
+  const projectType = (allowedProjectTypes.includes(rawProjectType as ProjectType) ? rawProjectType : "existing") as ProjectType;
+  const submittedValues = {
+    githubUrl,
+    projectName,
+    category,
+    projectType,
+    addReadme: formData.get("addReadme") === "on",
+    addAgents: formData.get("addAgents") === "on",
+    addClaude: formData.get("addClaude") === "on",
+    useEngineeringStandards: formData.get("useEngineeringStandards") === "on",
+  };
+  const workspaceRoot = process.env.DEV_CONTROL_ROOT?.trim();
+  if (!workspaceRoot) return { status: "error", message: "DEV_CONTROL_ROOT is not configured.", values: submittedValues };
   const fieldErrors: NewProjectState["fieldErrors"] = {};
 
   const validatedUrl = validateGithubUrl(githubUrl);
   if (!validatedUrl.ok) fieldErrors.githubUrl = validatedUrl.error;
-  if (!allowedProjectTypes.includes(projectType)) fieldErrors.projectType = "Choose a supported project type.";
+  if (!allowedProjectTypes.includes(rawProjectType as ProjectType)) fieldErrors.projectType = "Choose a supported project type.";
 
   const destination = await resolveSafeDestination(workspaceRoot, category, projectName);
   if (!destination.ok) {
@@ -68,7 +78,7 @@ export async function createProjectAction(
   }
 
   if (Object.keys(fieldErrors).length > 0 || !validatedUrl.ok || !destination.ok) {
-    return { status: "error", message: "Review the highlighted fields.", fieldErrors };
+    return { status: "error", message: "Review the highlighted fields.", fieldErrors, values: submittedValues };
   }
 
   if (projectType === "spring-boot") {
@@ -76,6 +86,7 @@ export async function createProjectAction(
       status: "error",
       message: "Automatic Spring Boot scaffolding is not enabled yet. Use “Existing repo only” to clone an existing Spring Boot repository.",
       fieldErrors: { projectType: "Spring Boot scaffolding requires an approved Initializr configuration." },
+      values: submittedValues,
     };
   }
 
@@ -88,10 +99,10 @@ export async function createProjectAction(
       projectName: projectName.trim(),
       projectType,
       setup: {
-        addReadme: formData.get("addReadme") === "on",
-        addAgents: formData.get("addAgents") === "on",
-        addClaude: formData.get("addClaude") === "on",
-        useEngineeringStandards: formData.get("useEngineeringStandards") === "on",
+        addReadme: submittedValues.addReadme,
+        addAgents: submittedValues.addAgents,
+        addClaude: submittedValues.addClaude,
+        useEngineeringStandards: submittedValues.useEngineeringStandards,
       },
     });
 
@@ -102,7 +113,7 @@ export async function createProjectAction(
       : "";
     return { status: "success", message: `${projectName.trim()} is ready.${skipped}` };
   } catch (error) {
-    return { status: "error", message: safeOperationError(error) };
+    return { status: "error", message: safeOperationError(error), values: submittedValues };
   }
 }
 

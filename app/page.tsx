@@ -30,7 +30,7 @@ export default async function Home() {
           <div className="brand-name">DevHub</div>
           <div className="brand-kicker"><span className="live-dot" /> Local workspace</div>
         </div>
-        {!workspace.error && <div className="header-action"><NewProjectDialog key={workspace.scannedAt} categories={categories} /></div>}
+        {!workspace.error && <div className="header-action"><NewProjectDialog categories={categories} /></div>}
       </header>
 
       <section className="dashboard-heading">

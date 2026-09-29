@@ -6,6 +6,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import type { ProjectType } from "./validation";
+import { resolveProgramInvocation, runInitializationStages, validateSpawnCwd } from "./project-operation-runtime";
 
 const execFileAsync = promisify(execFile);
 const COMMAND_ENV = { ...process.env, GIT_TERMINAL_PROMPT: "0" };
@@ -17,8 +18,10 @@ export type ProjectSetupOptions = {
   useEngineeringStandards: boolean;
 };
 
-async function executeProgram(file: string, args: string[], cwd: string, timeout: number) {
-  await execFileAsync(file, args, {
+async function executeProgram(program: "git" | "pnpm", args: string[], cwd: string, timeout: number) {
+  await validateSpawnCwd(cwd);
+  const invocation = resolveProgramInvocation(program);
+  await execFileAsync(invocation.executable, [...invocation.argsPrefix, ...args], {
     cwd,
     env: COMMAND_ENV,
     encoding: "utf8",
@@ -29,14 +32,9 @@ async function executeProgram(file: string, args: string[], cwd: string, timeout
 }
 
 async function ensureRemoteIsEmpty(cloneUrl: string, workspaceRoot: string) {
-  const { stdout } = await execFileAsync("git", ["ls-remote", "--heads", "--tags", "--", cloneUrl], {
-    cwd: workspaceRoot,
-    env: COMMAND_ENV,
-    encoding: "utf8",
-    maxBuffer: 512 * 1024,
-    timeout: 30_000,
-    windowsHide: true,
-  });
+  await validateSpawnCwd(workspaceRoot);
+  const invocation = resolveProgramInvocation("git");
+  const { stdout } = await execFileAsync(invocation.executable, [...invocation.argsPrefix, "ls-remote", "--heads", "--tags", "--", cloneUrl], { cwd: workspaceRoot, env: COMMAND_ENV, encoding: "utf8", maxBuffer: 512 * 1024, timeout: 30_000, windowsHide: true });
 
   if (stdout.trim()) {
     throw new Error("This GitHub repository already has content. Choose “Existing repo only” to clone it without scaffolding.");
@@ -49,7 +47,7 @@ export async function cloneRepository(cloneUrl: string, destination: string, wor
 
 export async function scaffoldNextApp(destination: string) {
   await executeProgram(
-    "pnpm.cmd",
+    "pnpm",
     [
       "create", "next-app", ".", "--ts", "--tailwind", "--eslint", "--app",
       "--use-pnpm", "--no-src-dir", "--import-alias", "@/*", "--no-agents-md",
@@ -110,26 +108,14 @@ export async function initializeProject({
   projectType: Exclude<ProjectType, "spring-boot">;
   setup: ProjectSetupOptions;
 }) {
-  let destinationOwned = false;
-
-  try {
-    if (projectType === "nextjs" || projectType === "empty") {
-      await ensureRemoteIsEmpty(cloneUrl, workspaceRoot);
-    }
-
-    await mkdir(/* turbopackIgnore: true */ destination);
-    destinationOwned = true;
-    await cloneRepository(cloneUrl, destination, workspaceRoot);
-
-    if (projectType === "nextjs") await scaffoldNextApp(destination);
-    const skippedFiles = await addOptionalProjectFiles(destination, projectName, setup);
-    return { skippedFiles };
-  } catch (error) {
-    if (destinationOwned) {
-      await rm(/* turbopackIgnore: true */ destination, { recursive: true, force: true });
-    }
-    throw error;
-  }
+  return runInitializationStages(projectType, {
+    ensureRemoteIsEmpty: () => ensureRemoteIsEmpty(cloneUrl, workspaceRoot),
+    reserveDestination: () => mkdir(/* turbopackIgnore: true */ destination).then(() => undefined),
+    cloneRepository: () => cloneRepository(cloneUrl, destination, workspaceRoot),
+    scaffoldNextApp: () => scaffoldNextApp(destination),
+    addOptionalFiles: () => addOptionalProjectFiles(destination, projectName, setup),
+    removeDestination: () => rm(/* turbopackIgnore: true */ destination, { recursive: true, force: true }),
+  });
 }
 
 export async function prepareDestinationCategory(categoryPath: string, workspaceRoot: string) {
