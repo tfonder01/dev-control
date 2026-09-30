@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { NodeLaunchMode, NodeRuntimeProfile, NodeRuntimeProfiles } from "./action-types";
+import { createBoundedRuntimeEnvironment } from "./runtime-environment";
 import { isNodeProfileSelector, isSensitiveEnvironmentName, parseEnvFile, safeProfileState } from "./runtime-config";
 import type { Repository } from "@/lib/workspace/types";
 
@@ -58,18 +59,11 @@ export async function resolveNodeRuntime(repository: Repository, mode: NodeLaunc
     demoMode: selectors.some((item) => item.state === "Demo"),
   };
 
-  const environment: Record<string, string | undefined> = { ...process.env };
-  delete environment.PORT;
-  delete environment.NODE_ENV;
-  for (const name of Object.keys(environment)) {
-    if (isNodeProfileSelector(name)) delete environment[name];
-  }
-  for (const [name, value] of Object.entries(resolved)) {
-    if (isNodeProfileSelector(name)) environment[name] = value;
-  }
-  environment.NODE_ENV = mode === "dev" ? "development" : "production";
-  environment.NO_COLOR = "1";
-  environment.FORCE_COLOR = "0";
+  const environment = createBoundedRuntimeEnvironment(process.env, {
+    NODE_ENV: mode === "dev" ? "development" : "production",
+    NO_COLOR: "1",
+    FORCE_COLOR: "0",
+  });
   for (const [name, value] of Object.entries(environment)) {
     if (value && isSensitiveEnvironmentName(name)) redactions.add(value);
   }

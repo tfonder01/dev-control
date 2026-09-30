@@ -1,5 +1,13 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
+
+import { createBoundedRuntimeEnvironment } from "../lib/projects/runtime-environment.ts";
 
 import {
   buildComposeCommandArgs,
@@ -19,6 +27,9 @@ import {
   mapDatasourceForHost,
   safeProfileState,
 } from "../lib/projects/runtime-config.ts";
+
+const execFileAsync = promisify(execFile);
+const require = createRequire(import.meta.url);
 
 test("parses dotenv syntax without exposing comments as values", () => {
   assert.deepEqual(parseEnvFile([
@@ -88,6 +99,46 @@ test("recognizes launch profile selectors and exposes only normalized states", (
   assert.equal(safeProfileState("DEMO_MODE", "false"), "Disabled");
   assert.equal(safeProfileState("NEXT_PUBLIC_USE_MOCK_DATA", "true"), "Demo");
   assert.equal(safeProfileState("NEXT_PUBLIC_APP_MODE", "tenant-secret-value"), "Custom");
+});
+
+test("launched Next.js runtimes prefer repository env while retaining DevHub's port", async (context) => {
+  const fixture = await mkdtemp(path.join(tmpdir(), "devhub-next-env-"));
+  context.after(() => rm(fixture, { recursive: true, force: true }));
+  await writeFile(path.join(fixture, ".env.local"), [
+    "LEAD_SCOUT_PROVIDER=google",
+    "GOOGLE_PLACES_API_KEY=test-placeholder-only",
+  ].join("\n"));
+
+  const environment = createBoundedRuntimeEnvironment({
+    ...process.env,
+    LEAD_SCOUT_PROVIDER: "mock",
+    GOOGLE_PLACES_API_KEY: "parent-placeholder-only",
+    DEV_CONTROL_ROOT: "C:\\workspace",
+  }, {
+    NODE_ENV: "development",
+    PORT: "4317",
+  });
+  assert.equal(environment.LEAD_SCOUT_PROVIDER, undefined);
+  assert.equal(environment.GOOGLE_PLACES_API_KEY, undefined);
+  assert.equal(environment.DEV_CONTROL_ROOT, undefined);
+  for (const requiredName of ["PATH", "SYSTEMROOT", "COMSPEC", "TEMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA"]) {
+    const inheritedName = Object.keys(process.env).find((name) => name.toUpperCase() === requiredName);
+    if (inheritedName) assert.equal(environment[inheritedName], process.env[inheritedName]);
+  }
+
+  const nextEnvironmentModule = require.resolve("@next/env", { paths: [require.resolve("next")] });
+  const script = [
+    "const { loadEnvConfig } = require(process.argv[1]);",
+    "loadEnvConfig(process.cwd(), true);",
+    "process.stdout.write(JSON.stringify({ provider: process.env.LEAD_SCOUT_PROVIDER, port: process.env.PORT }));",
+  ].join(" ");
+  const { stdout } = await execFileAsync(process.execPath, ["-e", script, nextEnvironmentModule], {
+    cwd: fixture,
+    env: environment,
+    encoding: "utf8",
+  });
+
+  assert.deepEqual(JSON.parse(stdout), { provider: "google", port: "4317" });
 });
 
 test("detects a PostgreSQL Compose service and its host port without reading secrets", () => {
