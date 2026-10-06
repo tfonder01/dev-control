@@ -5,6 +5,7 @@ import { revalidatePath } from "next/cache";
 import type { NewProjectState, RefreshWorkspaceState } from "./action-state";
 import type { RepositoryAction, RepositoryActionResult } from "@/lib/projects/action-types";
 import { openInCursor, openInExplorer, openInIntelliJ, openTerminal, runProjectCheck } from "@/lib/projects/actions";
+import { commitAndPush, type GitCommitPushRequest, type GitCommitPushResult } from "@/lib/projects/git-operations";
 import { initializeProject, prepareDestinationCategory } from "@/lib/projects/operations";
 import { detectProjectLinks } from "@/lib/projects/project-link-detection";
 import { resolveProjectLinks, resolveWorkspaceLinks, saveProjectLinks, saveWorkspaceLinks } from "@/lib/projects/project-links";
@@ -140,6 +141,43 @@ export async function runRepositoryAction(repositoryId: string, action: Reposito
     case "run-build": return runProjectCheck(repository, "build");
     case "run-verify": return runProjectCheck(repository, "verify");
   }
+}
+
+export async function commitAndPushAction(repositoryId: string, request: GitCommitPushRequest): Promise<GitCommitPushResult> {
+  if (!/^[A-Za-z0-9_-]{16}$/.test(repositoryId)) {
+    return { status: "error", message: "That repository is not available." };
+  }
+  if (!request || typeof request.commitMessage !== "string"
+    || typeof request.confirmProtectedBranch !== "boolean"
+    || typeof request.confirmSetUpstream !== "boolean"
+    || !Array.isArray(request.expectedChangedFiles)
+    || request.expectedChangedFiles.length > 20_000
+    || request.expectedChangedFiles.some((file) => typeof file !== "string")) {
+    return { status: "error", message: "The Commit & Push request is invalid." };
+  }
+
+  const repository = await getRepositoryFromSnapshot(repositoryId);
+  if (!repository) {
+    return { status: "error", message: "The repository is no longer in the workspace snapshot. Refresh the dashboard and try again." };
+  }
+
+  const result = await commitAndPush(repository, request);
+  if (result.status !== "confirmation-required") {
+    await refreshWorkspaceSnapshot();
+    revalidatePath("/");
+    revalidatePath(`/projects/${repositoryId}`);
+  }
+  return result;
+}
+
+export async function refreshRepositoryGitAction(repositoryId: string) {
+  if (!/^[A-Za-z0-9_-]{16}$/.test(repositoryId)) return null;
+  const snapshot = await refreshWorkspaceSnapshot();
+  const repository = snapshot.repositories.find((candidate) => candidate.id === repositoryId);
+  if (!repository) return null;
+  revalidatePath("/");
+  revalidatePath(`/projects/${repositoryId}`);
+  return repository.git;
 }
 
 export async function saveProjectLinksAction(repositoryId: string, formData: FormData): Promise<ProjectLinksActionResult> {

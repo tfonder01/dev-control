@@ -20,7 +20,7 @@ function repositoryAt(repositoryPath: string): Repository {
     configurationFiles: [],
     commands: [],
     capabilities: { packageManager: null, packageScripts: [], hasMavenWrapper: false, hasSpringBoot: false, devPortHint: null, devPortSource: null },
-    git: { branch: "main", isDirty: false, changedFileCount: 0, changedFiles: [], latestCommitHash: null, latestCommitSubject: null, latestCommitTimestamp: null, originUrl: "git@github.com:owner/example.git", githubUrl: "https://github.com/owner/example", error: null },
+    git: { branch: "main", isDirty: false, changedFileCount: 0, changedFiles: [], hasConflicts: false, upstreamRemote: "origin", upstreamBranch: "main", ahead: 0, behind: 0, latestCommitHash: null, latestCommitSubject: null, latestCommitTimestamp: null, originUrl: "git@github.com:owner/example.git", githubUrl: "https://github.com/owner/example", error: null },
   };
 }
 

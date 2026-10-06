@@ -5,6 +5,7 @@ import { ArrowLeft, Box, Check, FileCode2, FolderGit2, GitBranch, GitCommitHoriz
 
 import { formatActivity, PageShell, RepositoryState, TechnologyBadge } from "@/app/components";
 import { ProjectActionsPanel } from "@/app/project-actions-panel";
+import { GitActionsPanel } from "@/app/git-actions-panel";
 import { ProjectLinksPanel } from "@/app/project-links-panel";
 import { getDependencyStatus } from "@/lib/projects/dependencies";
 import { detectProjectLinks } from "@/lib/projects/project-link-detection";
@@ -55,6 +56,8 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
         initialConfig={projectLinksConfig}
         initialLinks={resolveProjectLinks(projectLinksConfig, detectedProjectLinks)}
       />
+
+      <GitActionsPanel repositoryId={repository.id} initialGit={repository.git} />
 
       <ProjectActionsPanel
         repositoryId={repository.id}

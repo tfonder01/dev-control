@@ -8,6 +8,11 @@ export type GitMetadata = {
   isDirty: boolean;
   changedFileCount: number;
   changedFiles: string[];
+  hasConflicts: boolean;
+  upstreamRemote: string | null;
+  upstreamBranch: string | null;
+  ahead: number | null;
+  behind: number | null;
   latestCommitHash: string | null;
   latestCommitSubject: string | null;
   latestCommitTimestamp: string | null;
