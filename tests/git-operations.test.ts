@@ -24,8 +24,8 @@ function repository(repositoryPath: string, id = "testrepo00000001"): Repository
     relativePath: path.basename(repositoryPath),
     technologies: [],
     configurationFiles: [],
-    commands: [],
-    capabilities: { packageManager: null, packageScripts: [], hasMavenWrapper: false, hasSpringBoot: false, devPortHint: null, devPortSource: null },
+    services: [],
+    infrastructure: [],
     git: {
       branch: "feature", isDirty: true, changedFileCount: 1, changedFiles: ["change.txt"], hasConflicts: false,
       upstreamRemote: "origin", upstreamBranch: "feature", ahead: 0, behind: 0,

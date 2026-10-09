@@ -28,14 +28,38 @@ export type ProjectCommand = {
 
 export type PackageManager = "pnpm" | "npm" | "yarn";
 export type ProjectScript = "dev" | "start" | "test" | "lint" | "build";
+export type JavaBuildTool = "maven" | "gradle";
 
 export type ProjectCapabilities = {
   packageManager: PackageManager | null;
   packageScripts: ProjectScript[];
   hasMavenWrapper: boolean;
+  hasGradleWrapper: boolean;
   hasSpringBoot: boolean;
+  javaBuildTool: JavaBuildTool | null;
   devPortHint: number | null;
   devPortSource: "script" | "spring-config" | "framework-default" | null;
+};
+
+export type ProjectService = {
+  id: string;
+  name: string;
+  path: string;
+  relativePath: string;
+  kind: "node" | "spring-boot";
+  technologies: Technology[];
+  configurationFiles: string[];
+  commands: ProjectCommand[];
+  capabilities: ProjectCapabilities;
+};
+
+export type InfrastructureDefinition = {
+  id: string;
+  name: string;
+  path: string;
+  relativePath: string;
+  kind: "docker-compose";
+  configurationFile: string;
 };
 
 export type Repository = {
@@ -45,8 +69,8 @@ export type Repository = {
   relativePath: string;
   technologies: Technology[];
   configurationFiles: string[];
-  commands: ProjectCommand[];
-  capabilities: ProjectCapabilities;
+  services: ProjectService[];
+  infrastructure: InfrastructureDefinition[];
   git: GitMetadata;
 };
 

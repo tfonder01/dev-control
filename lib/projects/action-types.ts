@@ -1,4 +1,4 @@
-import type { ProjectCapabilities } from "@/lib/workspace/types";
+import type { ProjectCapabilities, ProjectCommand, Technology } from "@/lib/workspace/types";
 
 export type RepositoryIde = "cursor" | "intellij";
 
@@ -17,7 +17,7 @@ export type RepositoryAction =
   | "run-verify";
 
 export type DevServerStatus = {
-  state: "stopped" | "starting" | "running" | "port-in-use" | "failed";
+  state: "stopped" | "starting" | "running" | "external" | "port-in-use" | "failed";
   ownedByDevHub: boolean;
   port: number | null;
   url: string | null;
@@ -81,7 +81,20 @@ export type RepositoryActionResult = {
   nodeRuntime?: NodeRuntimeProfile;
 };
 
-export type RepositoryActionsModel = {
+export type ProjectServiceSummary = {
+  id: string;
+  name: string;
+  relativePath: string;
+  kind: "node" | "spring-boot";
+  technologies: Technology[];
+  commands: ProjectCommand[];
   capabilities: ProjectCapabilities;
+};
+
+export type ProjectServiceActionsModel = {
+  service: ProjectServiceSummary;
   devServer: DevServerStatus;
+  springRuntime: SpringRuntimeStatus | null;
+  dependencies: DependencyRuntimeStatus | null;
+  nodeRuntimes: NodeRuntimeProfiles | null;
 };

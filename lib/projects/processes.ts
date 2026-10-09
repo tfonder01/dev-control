@@ -7,9 +7,13 @@ import { promisify } from "node:util";
 
 import type { DevServerStatus, NodeLaunchMode, RepositoryActionResult } from "./action-types";
 import { resolveNodeRuntime } from "./node-runtime";
+import { findAvailablePort } from "./port-allocation";
+import { classifyUnmanagedListener, type WindowsProcessEvidence } from "./process-evidence";
 import { classifySpringFailureOutput, redactRuntimeOutput } from "./runtime-config";
 import { resolveSpringRuntime } from "./runtime-profile";
-import type { PackageManager, Repository } from "@/lib/workspace/types";
+import { packageScriptCommand, requiresWindowsCommandShell, springLaunchArgs, springWrapperCommand } from "./service-commands";
+import { serviceRuntimeKey } from "./service-resolution";
+import type { ProjectService, Repository } from "@/lib/workspace/types";
 
 const STARTUP_WAIT_MS = 8_000;
 const STOP_WAIT_MS = 5_000;
@@ -17,21 +21,16 @@ const PORT_SEARCH_RANGE_SIZE = 20;
 const MAX_OUTPUT_CHARS = 24_000;
 const execFileAsync = promisify(execFile);
 
-type WindowsProcessIdentity = {
-  pid: number;
-  parentPid: number;
-  creationTime: string;
-};
-
 type ManagedProcess = {
   child: ChildProcessByStdio<null, Readable, Readable>;
-  repositoryId: string;
+  runtimeKey: string;
+  serviceId: string;
   runtimeKind: "node" | "spring-boot";
   launchMode: NodeLaunchMode | null;
   startedAt: string;
   port: number | null;
-  rootProcess: WindowsProcessIdentity | null;
-  listenerProcess: WindowsProcessIdentity | null;
+  rootProcess: WindowsProcessEvidence | null;
+  listenerProcess: WindowsProcessEvidence | null;
   output: string;
   redactions: string[];
   stopping: boolean;
@@ -73,19 +72,12 @@ function outputExcerpt(output: string) {
   return output.trim().split("\n").slice(-40).join("\n");
 }
 
-function packageCommand(packageManager: PackageManager, script: "dev" | "build" | "start") {
-  const executable = `${packageManager}${process.platform === "win32" ? ".cmd" : ""}`;
-  return { executable, args: packageManager === "npm" ? ["run", script] : [script] };
-}
-
-function spawnPackageScript(repository: Repository, script: "dev" | "build" | "start", environment: NodeJS.ProcessEnv): ChildProcessByStdio<null, Readable, Readable> {
-  const packageManager = repository.capabilities.packageManager;
-  if (!packageManager) throw new Error("No supported package manager was detected.");
-  const command = packageCommand(packageManager, script);
+function spawnPackageScript(service: ProjectService, script: "dev" | "build" | "start", environment: NodeJS.ProcessEnv): ChildProcessByStdio<null, Readable, Readable> {
+  const command = packageScriptCommand(service, script);
 
   if (process.platform === "win32") {
     return spawn(/* turbopackIgnore: true */ process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe", ["/d", "/s", "/c", command.executable, ...command.args], {
-      cwd: repository.path,
+      cwd: service.path,
       env: environment,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
@@ -93,29 +85,33 @@ function spawnPackageScript(repository: Repository, script: "dev" | "build" | "s
   }
 
   return spawn(/* turbopackIgnore: true */ command.executable, command.args, {
-    cwd: repository.path,
+    cwd: service.path,
     env: environment,
     stdio: ["ignore", "pipe", "pipe"],
   });
 }
 
-async function spawnSpringBoot(repository: Repository, port: number, resolvedEnvironment: NodeJS.ProcessEnv): Promise<ChildProcessByStdio<null, Readable, Readable>> {
-  let executable: string;
-  if (repository.capabilities.hasMavenWrapper) {
-    executable = process.platform === "win32" ? ".\\mvnw.cmd" : "./mvnw";
-  } else if (process.platform === "win32") {
+async function spawnSpringBoot(service: ProjectService, port: number, resolvedEnvironment: NodeJS.ProcessEnv): Promise<ChildProcessByStdio<null, Readable, Readable>> {
+  const wrapper = springWrapperCommand(service, port);
+  let executable = wrapper?.executable;
+  let args = wrapper?.args;
+  const buildTool = service.capabilities.javaBuildTool;
+  if (!executable && process.platform === "win32") {
+    const command = buildTool === "gradle" ? "gradle.bat" : "mvn.cmd";
     try {
-      const { stdout } = await execFileAsync("where.exe", ["mvn.cmd"], { windowsHide: true, timeout: 3_000 });
+      const { stdout } = await execFileAsync("where.exe", [command], { windowsHide: true, timeout: 3_000 });
       executable = stdout.trim().split(/\r?\n/)[0];
       if (!executable) throw new Error();
     } catch {
-      throw new Error("Maven was not found and this repository has no Maven wrapper.");
+      const label = buildTool === "gradle" ? "Gradle" : "Maven";
+      throw new Error(`${label} was not found and this service has no ${label} wrapper.`);
     }
-  } else {
-    executable = "mvn";
+    args = springLaunchArgs(service, port);
+  } else if (!executable) {
+    executable = buildTool === "gradle" ? "gradle" : "mvn";
+    args = springLaunchArgs(service, port);
   }
-
-  const args = ["spring-boot:run", `-Dspring-boot.run.arguments=--server.port=${port}`];
+  if (!executable || !args) throw new Error("The Spring Boot launch command could not be resolved.");
   const inheritedEnvironment = Object.fromEntries(
     Object.entries(resolvedEnvironment).filter(([name]) => name !== "PORT" && name !== "NODE_ENV"),
   ) as NodeJS.ProcessEnv;
@@ -126,9 +122,9 @@ async function spawnSpringBoot(repository: Repository, port: number, resolvedEnv
     FORCE_COLOR: "0",
   };
 
-  if (process.platform === "win32" && executable.toLowerCase().endsWith(".cmd")) {
+  if (requiresWindowsCommandShell(executable)) {
     return spawn(/* turbopackIgnore: true */ process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe", ["/d", "/s", "/c", executable, ...args], {
-      cwd: repository.path,
+      cwd: service.path,
       env: environment,
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
@@ -136,7 +132,7 @@ async function spawnSpringBoot(repository: Repository, port: number, resolvedEnv
   }
 
   return spawn(/* turbopackIgnore: true */ executable, args, {
-    cwd: repository.path,
+    cwd: service.path,
     env: environment,
     stdio: ["ignore", "pipe", "pipe"],
   });
@@ -155,15 +151,6 @@ async function isPortListening(port: number) {
     socket.once("timeout", () => finish(false));
     socket.once("error", () => finish(false));
   });
-}
-
-async function findAvailablePort(preferredPort: number) {
-  for (let offset = 0; offset < PORT_SEARCH_RANGE_SIZE; offset += 1) {
-    const port = preferredPort + offset;
-    if (port > 65_535) break;
-    if (!runtime.reservedPorts.has(port) && !await isPortListening(port)) return port;
-  }
-  return null;
 }
 
 async function findWindowsListenerPid(port: number) {
@@ -187,7 +174,7 @@ async function readWindowsProcessTable() {
   if (process.platform !== "win32") return null;
   const command = [
     "Get-CimInstance Win32_Process",
-    "Select-Object ProcessId,ParentProcessId,@{Name='CreationTime';Expression={$_.CreationDate.ToUniversalTime().Ticks.ToString()}}",
+    "Select-Object ProcessId,ParentProcessId,@{Name='CreationTime';Expression={$_.CreationDate.ToUniversalTime().Ticks.ToString()}},ExecutablePath,CommandLine",
     "ConvertTo-Json -Compress",
   ].join(" | ");
 
@@ -201,27 +188,33 @@ async function readWindowsProcessTable() {
       ProcessId: number;
       ParentProcessId: number;
       CreationTime: string;
+      ExecutablePath: string | null;
+      CommandLine: string | null;
     } | {
       ProcessId: number;
       ParentProcessId: number;
       CreationTime: string;
+      ExecutablePath: string | null;
+      CommandLine: string | null;
     }[];
     const rows = Array.isArray(parsed) ? parsed : [parsed];
     return new Map(rows.map((row) => [row.ProcessId, {
       pid: row.ProcessId,
       parentPid: row.ParentProcessId,
       creationTime: row.CreationTime,
+      executablePath: row.ExecutablePath,
+      commandLine: row.CommandLine,
     }]));
   } catch {
     return null;
   }
 }
 
-function sameWindowsProcess(left: WindowsProcessIdentity | undefined | null, right: WindowsProcessIdentity | undefined | null) {
+function sameWindowsProcess(left: WindowsProcessEvidence | undefined | null, right: WindowsProcessEvidence | undefined | null) {
   return Boolean(left && right && left.pid === right.pid && left.creationTime === right.creationTime);
 }
 
-function isDescendantOf(pid: number, ancestorPid: number, processes: Map<number, WindowsProcessIdentity>) {
+function isDescendantOf(pid: number, ancestorPid: number, processes: Map<number, WindowsProcessEvidence>) {
   const visited = new Set<number>();
   let current = processes.get(pid);
   while (current && !visited.has(current.pid)) {
@@ -232,7 +225,7 @@ function isDescendantOf(pid: number, ancestorPid: number, processes: Map<number,
   return false;
 }
 
-function collectProcessTree(rootPid: number, processes: Map<number, WindowsProcessIdentity>) {
+function collectProcessTree(rootPid: number, processes: Map<number, WindowsProcessEvidence>) {
   return [...processes.values()].filter((candidate) => isDescendantOf(candidate.pid, rootPid, processes));
 }
 
@@ -257,20 +250,20 @@ async function captureWindowsOwnership(entry: ManagedProcess) {
 }
 
 async function finalizeExitedEntry(entry: ManagedProcess, exitCode: number | null) {
-  if (runtime.processes.get(entry.repositoryId) !== entry) return;
+  if (runtime.processes.get(entry.runtimeKey) !== entry) return;
   if (entry.port && await isPortListening(entry.port)) {
     if (process.platform === "win32" && await captureWindowsOwnership(entry)) return;
-    runtime.processes.delete(entry.repositoryId);
+    runtime.processes.delete(entry.runtimeKey);
     runtime.reservedPorts.delete(entry.port);
     return;
   }
 
-  runtime.processes.delete(entry.repositoryId);
+  runtime.processes.delete(entry.runtimeKey);
   if (entry.port) runtime.reservedPorts.delete(entry.port);
   const processName = entry.runtimeKind === "spring-boot" ? "Backend" : entry.launchMode === "preview" ? "Preview server" : "Dev server";
   const classifiedMessage = entry.runtimeKind === "spring-boot" ? classifySpringFailureOutput(entry.output) : null;
   runtime.lastStatus.set(
-    entry.repositoryId,
+    entry.runtimeKey,
     statusForEntry(entry, entry.stopping ? "stopped" : "failed", entry.stopping ? "Stopped" : classifiedMessage ?? `${processName} exited unexpectedly (code ${exitCode ?? "unknown"}).`),
   );
 }
@@ -289,9 +282,10 @@ function statusForEntry(entry: ManagedProcess, state: DevServerStatus["state"], 
   };
 }
 
-export async function detectRunningDevServer(repository: Repository): Promise<DevServerStatus> {
-  const entry = runtime.processes.get(repository.id);
-  let possibleExternalPort = repository.capabilities.devPortHint;
+export async function detectRunningDevServer(repository: Repository, service: ProjectService): Promise<DevServerStatus> {
+  const key = serviceRuntimeKey(repository.id, service.id);
+  const entry = runtime.processes.get(key);
+  let possibleExternalPort = service.capabilities.devPortHint;
   if (entry) {
     possibleExternalPort = entry.port ?? possibleExternalPort;
     const listening = entry.port ? await isPortListening(entry.port) : false;
@@ -300,7 +294,7 @@ export async function detectRunningDevServer(repository: Repository): Promise<De
       if (ownershipVerified) {
         return statusForEntry(entry, "running", `Running on localhost:${entry.port}`);
       }
-      runtime.processes.delete(repository.id);
+      runtime.processes.delete(key);
       if (entry.port) runtime.reservedPorts.delete(entry.port);
     } else if (entry.child.exitCode === null && entry.child.signalCode === null) {
       return statusForEntry(entry, "starting", "DevHub process is starting.");
@@ -311,18 +305,32 @@ export async function detectRunningDevServer(repository: Repository): Promise<De
 
   const port = possibleExternalPort;
   if (port && await isPortListening(port)) {
+    const listenerPid = await findWindowsListenerPid(port);
+    const processes = await readWindowsProcessTable();
+    const state = classifyUnmanagedListener(listenerPid, service.path, processes);
+    if (state === "external") {
+      return {
+        state,
+        ownedByDevHub: false,
+        port,
+        url: `http://localhost:${port}`,
+        startedAt: null,
+        message: `A matching service process is listening on localhost:${port}. DevHub did not start it and will not stop it.`,
+        launchMode: null,
+      };
+    }
     return {
-      state: "port-in-use",
+      state,
       ownedByDevHub: false,
       port,
-      url: `http://localhost:${port}`,
+      url: null,
       startedAt: null,
-      message: `Port ${port} is already in use. DevHub will not claim or stop that process.`,
+      message: `Port ${port} is being used by another process. DevHub will choose an available port when starting this service.`,
       launchMode: null,
     };
   }
 
-  return runtime.lastStatus.get(repository.id) ?? {
+  return runtime.lastStatus.get(key) ?? {
     state: "stopped",
     ownedByDevHub: false,
     port,
@@ -333,8 +341,8 @@ export async function detectRunningDevServer(repository: Repository): Promise<De
   };
 }
 
-async function runNodeBuild(repository: Repository, environment: NodeJS.ProcessEnv, redactions: string[]) {
-  const child = spawnPackageScript(repository, "build", environment);
+async function runNodeBuild(service: ProjectService, environment: NodeJS.ProcessEnv, redactions: string[]) {
+  const child = spawnPackageScript(service, "build", environment);
   let output = "";
   const append = (chunk: Buffer | string) => {
     output = redactRuntimeOutput(cleanOutput(`${output}${chunk.toString()}`), redactions).slice(-MAX_OUTPUT_CHARS);
@@ -370,15 +378,16 @@ async function runNodeBuild(repository: Repository, environment: NodeJS.ProcessE
   });
 }
 
-async function startDevServerOnce(repository: Repository, launchMode: NodeLaunchMode): Promise<RepositoryActionResult> {
-  const runtimeKind = repository.capabilities.hasSpringBoot ? "spring-boot" : "node";
+async function startDevServerOnce(repository: Repository, service: ProjectService, launchMode: NodeLaunchMode): Promise<RepositoryActionResult> {
+  const key = serviceRuntimeKey(repository.id, service.id);
+  const runtimeKind = service.kind;
   if (runtimeKind === "spring-boot" && launchMode === "preview") {
     return { status: "error", message: "Preview mode is available for detected Next.js runtimes." };
   }
-  const hasNodeDevScript = repository.capabilities.packageScripts.includes("dev") && Boolean(repository.capabilities.packageManager);
-  const hasNodePreviewScripts = repository.capabilities.packageScripts.includes("build")
-    && repository.capabilities.packageScripts.includes("start")
-    && Boolean(repository.capabilities.packageManager);
+  const hasNodeDevScript = service.capabilities.packageScripts.includes("dev") && Boolean(service.capabilities.packageManager);
+  const hasNodePreviewScripts = service.capabilities.packageScripts.includes("build")
+    && service.capabilities.packageScripts.includes("start")
+    && Boolean(service.capabilities.packageManager);
   if (runtimeKind === "node" && launchMode === "dev" && !hasNodeDevScript) {
     return { status: "error", message: "This repository does not expose a supported development runtime." };
   }
@@ -386,19 +395,23 @@ async function startDevServerOnce(repository: Repository, launchMode: NodeLaunch
     return { status: "error", message: "Preview requires detected build and start scripts." };
   }
 
-  const current = await detectRunningDevServer(repository);
-  if (current.state === "running" || current.state === "starting") {
-    return { status: "running", message: "Already running from DevHub.", devServer: current };
+  const current = await detectRunningDevServer(repository, service);
+  if (current.state === "running" || current.state === "starting" || current.state === "external") {
+    return {
+      status: "running",
+      message: current.state === "external" ? "Already running outside DevHub." : "Already running from DevHub.",
+      devServer: current,
+    };
   }
 
-  const springRuntime = runtimeKind === "spring-boot" ? await resolveSpringRuntime(repository) : null;
-  const nodeRuntime = runtimeKind === "node" ? await resolveNodeRuntime(repository, launchMode) : null;
+  const springRuntime = runtimeKind === "spring-boot" ? await resolveSpringRuntime(repository, service) : null;
+  const nodeRuntime = runtimeKind === "node" ? await resolveNodeRuntime(service, launchMode) : null;
   if (springRuntime && !springRuntime.status.canStart) {
     return { status: "error", message: springRuntime.status.message ?? "Local prerequisites are not ready.", springRuntime: springRuntime.status };
   }
 
-  const preferredPort = springRuntime?.preferredPort ?? repository.capabilities.devPortHint ?? (runtimeKind === "spring-boot" ? 8080 : 3000);
-  const port = await findAvailablePort(preferredPort);
+  const preferredPort = springRuntime?.preferredPort ?? service.capabilities.devPortHint ?? (runtimeKind === "spring-boot" ? 8080 : 3000);
+  const port = await findAvailablePort(preferredPort, runtime.reservedPorts, isPortListening, PORT_SEARCH_RANGE_SIZE);
   if (!port) {
     return {
       status: "error",
@@ -415,7 +428,7 @@ async function startDevServerOnce(repository: Repository, launchMode: NodeLaunch
   if (runtimeKind === "node" && launchMode === "preview" && nodeRuntime) {
     let build: Awaited<ReturnType<typeof runNodeBuild>>;
     try {
-      build = await runNodeBuild(repository, nodeRuntime.environment, nodeRuntime.redactions);
+      build = await runNodeBuild(service, nodeRuntime.environment, nodeRuntime.redactions);
     } catch (error) {
       runtime.reservedPorts.delete(port);
       return {
@@ -439,8 +452,8 @@ async function startDevServerOnce(repository: Repository, launchMode: NodeLaunch
   let child: ChildProcessByStdio<null, Readable, Readable>;
   try {
     child = runtimeKind === "spring-boot"
-      ? await spawnSpringBoot(repository, port, springRuntime?.environment ?? process.env)
-      : spawnPackageScript(repository, launchMode === "preview" ? "start" : "dev", {
+      ? await spawnSpringBoot(service, port, springRuntime?.environment ?? process.env)
+      : spawnPackageScript(service, launchMode === "preview" ? "start" : "dev", {
           ...nodeRuntime!.environment,
           PORT: String(port),
         } as NodeJS.ProcessEnv);
@@ -455,7 +468,8 @@ async function startDevServerOnce(repository: Repository, launchMode: NodeLaunch
   }
   const entry: ManagedProcess = {
     child,
-    repositoryId: repository.id,
+    runtimeKey: key,
+    serviceId: service.id,
     runtimeKind,
     launchMode: runtimeKind === "node" ? launchMode : null,
     startedAt,
@@ -466,8 +480,8 @@ async function startDevServerOnce(repository: Repository, launchMode: NodeLaunch
     redactions: springRuntime?.redactions ?? nodeRuntime?.redactions ?? [],
     stopping: false,
   };
-  runtime.processes.set(repository.id, entry);
-  runtime.lastStatus.delete(repository.id);
+  runtime.processes.set(key, entry);
+  runtime.lastStatus.delete(key);
 
   child.stdout.on("data", (chunk) => appendOutput(entry, chunk));
   child.stderr.on("data", (chunk) => appendOutput(entry, chunk));
@@ -486,8 +500,8 @@ async function startDevServerOnce(repository: Repository, launchMode: NodeLaunch
 
   const deadline = Date.now() + (runtimeKind === "spring-boot" ? 30_000 : STARTUP_WAIT_MS);
   while (Date.now() < deadline) {
-    if (!runtime.processes.has(repository.id)) {
-      const failed = runtime.lastStatus.get(repository.id) ?? await detectRunningDevServer(repository);
+    if (!runtime.processes.has(key)) {
+      const failed = runtime.lastStatus.get(key) ?? await detectRunningDevServer(repository, service);
       return { status: "error", message: failed.message, exitCode: child.exitCode, output: failed.output, devServer: failed, springRuntime: springRuntime?.status, nodeRuntime: nodeRuntime?.status };
     }
     if (entry.port && await isPortListening(entry.port)) {
@@ -500,7 +514,7 @@ async function startDevServerOnce(repository: Repository, launchMode: NodeLaunch
     }
     if (child.exitCode !== null || child.signalCode !== null) {
       await finalizeExitedEntry(entry, child.exitCode);
-      const failed = runtime.lastStatus.get(repository.id) ?? await detectRunningDevServer(repository);
+      const failed = runtime.lastStatus.get(key) ?? await detectRunningDevServer(repository, service);
       return { status: "error", message: failed.message, exitCode: child.exitCode, output: failed.output, devServer: failed, springRuntime: springRuntime?.status, nodeRuntime: nodeRuntime?.status };
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
@@ -516,29 +530,31 @@ async function startDevServerOnce(repository: Repository, launchMode: NodeLaunch
   return { status: "running", message: starting.message, output: starting.output, devServer: starting, springRuntime: springRuntime?.status, nodeRuntime: nodeRuntime?.status };
 }
 
-export function startDevServer(repository: Repository): Promise<RepositoryActionResult> {
-  return startServer(repository, "dev");
+export function startDevServer(repository: Repository, service: ProjectService): Promise<RepositoryActionResult> {
+  return startServer(repository, service, "dev");
 }
 
-export function startPreviewServer(repository: Repository): Promise<RepositoryActionResult> {
-  return startServer(repository, "preview");
+export function startPreviewServer(repository: Repository, service: ProjectService): Promise<RepositoryActionResult> {
+  return startServer(repository, service, "preview");
 }
 
-function startServer(repository: Repository, launchMode: NodeLaunchMode): Promise<RepositoryActionResult> {
-  const inFlight = runtime.starts.get(repository.id);
+function startServer(repository: Repository, service: ProjectService, launchMode: NodeLaunchMode): Promise<RepositoryActionResult> {
+  const key = serviceRuntimeKey(repository.id, service.id);
+  const inFlight = runtime.starts.get(key);
   if (inFlight) return inFlight;
 
-  const start = startDevServerOnce(repository, launchMode).finally(() => {
-    if (runtime.starts.get(repository.id) === start) runtime.starts.delete(repository.id);
+  const start = startDevServerOnce(repository, service, launchMode).finally(() => {
+    if (runtime.starts.get(key) === start) runtime.starts.delete(key);
   });
-  runtime.starts.set(repository.id, start);
+  runtime.starts.set(key, start);
   return start;
 }
 
-export async function stopDevServer(repository: Repository): Promise<RepositoryActionResult> {
-  const entry = runtime.processes.get(repository.id);
+export async function stopDevServer(repository: Repository, service: ProjectService): Promise<RepositoryActionResult> {
+  const key = serviceRuntimeKey(repository.id, service.id);
+  const entry = runtime.processes.get(key);
   if (!entry) {
-    return { status: "error", message: "No DevHub-owned dev process is running for this repository." };
+    return { status: "error", message: "No DevHub-owned process is running for this service." };
   }
 
   entry.stopping = true;
@@ -556,13 +572,13 @@ export async function stopDevServer(repository: Repository): Promise<RepositoryA
     if (!processes || (portListening && !listenerVerified) || (!portListening && !rootVerified)) {
       entry.stopping = false;
       if (portListening) {
-        runtime.processes.delete(repository.id);
+        runtime.processes.delete(key);
         if (entry.port) runtime.reservedPorts.delete(entry.port);
         const uncertain: DevServerStatus = {
           state: "port-in-use",
           ownedByDevHub: false,
           port: entry.port,
-          url: entry.port ? `http://localhost:${entry.port}` : null,
+          url: null,
           startedAt: null,
           message: "DevHub could not verify ownership of the listening process, so it was not stopped.",
           launchMode: null,
@@ -574,7 +590,7 @@ export async function stopDevServer(repository: Repository): Promise<RepositoryA
     }
 
     if (currentListener && !entry.listenerProcess) entry.listenerProcess = currentListener;
-    const ownedProcesses = new Map<number, WindowsProcessIdentity>();
+    const ownedProcesses = new Map<number, WindowsProcessEvidence>();
     if (rootVerified && entry.rootProcess) {
       for (const owned of collectProcessTree(entry.rootProcess.pid, processes)) ownedProcesses.set(owned.pid, owned);
     }
@@ -628,17 +644,17 @@ export async function stopDevServer(repository: Repository): Promise<RepositoryA
     if (entry.port && await isPortListening(entry.port)) {
       entry.stopping = false;
       const stillRunning = statusForEntry(entry, "running", `DevHub could not stop its process on localhost:${entry.port}.`);
-      runtime.processes.set(repository.id, entry);
+      runtime.processes.set(key, entry);
       return { status: "error", message: stillRunning.message, output: stillRunning.output, devServer: stillRunning };
     }
     if (entry.child.exitCode === null && entry.child.signalCode === null) entry.child.kill();
   }
 
-  runtime.processes.delete(repository.id);
+  runtime.processes.delete(key);
   if (entry.port) runtime.reservedPorts.delete(entry.port);
   const stopped = statusForEntry(entry, "stopped", "Stopped");
   stopped.url = null;
-  runtime.lastStatus.set(repository.id, stopped);
+  runtime.lastStatus.set(key, stopped);
   return {
     status: "stopped",
     message: entry.runtimeKind === "spring-boot" ? "DevHub stopped its backend." : entry.launchMode === "preview" ? "DevHub stopped its preview process." : "DevHub stopped its dev process.",

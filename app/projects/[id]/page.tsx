@@ -14,18 +14,39 @@ import { detectRunningDevServer } from "@/lib/projects/processes";
 import { resolveNodeRuntimeProfiles } from "@/lib/projects/node-runtime";
 import { resolveSpringRuntime } from "@/lib/projects/runtime-profile";
 import { getRepositoryFromSnapshot } from "@/lib/workspace/snapshot";
+import type { ProjectServiceActionsModel } from "@/lib/projects/action-types";
 
 export default async function ProjectPage({ params }: { params: Promise<{ id: string }> }) {
   await connection();
   const { id } = await params;
   const repository = await getRepositoryFromSnapshot(id);
   if (!repository) notFound();
-  const isNextJs = repository.technologies.some((technology) => technology.name === "Next.js");
-  const [devServer, springRuntime, dependencies, nodeRuntimes, projectLinksConfig, detectedProjectLinks] = await Promise.all([
-    detectRunningDevServer(repository),
-    repository.capabilities.hasSpringBoot ? resolveSpringRuntime(repository).then((runtime) => runtime.status) : null,
-    repository.capabilities.hasSpringBoot ? getDependencyStatus(repository) : null,
-    isNextJs ? resolveNodeRuntimeProfiles(repository) : null,
+  const [serviceModels, projectLinksConfig, detectedProjectLinks] = await Promise.all([
+    Promise.all(repository.services.map(async (service): Promise<ProjectServiceActionsModel> => {
+      const isSpringBoot = service.kind === "spring-boot";
+      const isNextJs = service.technologies.some((technology) => technology.name === "Next.js");
+      const [devServer, springRuntime, dependencies, nodeRuntimes] = await Promise.all([
+        detectRunningDevServer(repository, service),
+        isSpringBoot ? resolveSpringRuntime(repository, service).then((runtime) => runtime.status) : null,
+        isSpringBoot ? getDependencyStatus(repository, service) : null,
+        isNextJs ? resolveNodeRuntimeProfiles(service) : null,
+      ]);
+      return {
+        service: {
+          id: service.id,
+          name: service.name,
+          relativePath: service.relativePath,
+          kind: service.kind,
+          technologies: service.technologies,
+          commands: service.commands,
+          capabilities: service.capabilities,
+        },
+        devServer,
+        springRuntime,
+        dependencies,
+        nodeRuntimes,
+      };
+    })),
     getProjectLinks(repository.id),
     detectProjectLinks(repository),
   ]);
@@ -61,12 +82,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
 
       <ProjectActionsPanel
         repositoryId={repository.id}
-        technologies={repository.technologies.map((technology) => technology.name)}
-        capabilities={repository.capabilities}
-        initialDevServer={devServer}
-        initialSpringRuntime={springRuntime}
-        initialDependencies={dependencies}
-        initialNodeRuntimes={nodeRuntimes}
+        services={serviceModels}
       />
 
       <section className="detail-grid">
@@ -110,10 +126,20 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
 
         <div className="detail-card">
           <div className="card-heading"><Terminal aria-hidden="true" size={16} /><h2>Commands</h2></div>
-          {repository.commands.length > 0 ? (
-            <ul className="command-list">{repository.commands.map((command) => <li key={`${command.label}-${command.command}`}><span>{command.label}</span><code>{command.command}</code></li>)}</ul>
+          {repository.services.some((service) => service.commands.length > 0) ? (
+            <ul className="command-list">{repository.services.flatMap((service) => service.commands.map((command) => (
+              <li key={`${service.id}-${command.label}-${command.command}`}><span>{service.relativePath === "." ? command.label : `${service.relativePath} · ${command.label}`}</span><code>{command.command}</code></li>
+            )))}</ul>
           ) : <p className="muted">No common project commands detected.</p>}
           <p className="card-note">Detected commands are informational. DevHub runs only the allowlisted actions above.</p>
+        </div>
+
+        <div className="detail-card">
+          <div className="card-heading"><ListTree aria-hidden="true" size={16} /><h2>Infrastructure</h2></div>
+          {repository.infrastructure.length > 0 ? (
+            <ul className="file-list">{repository.infrastructure.map((item) => <li key={item.id}><Check aria-hidden="true" size={13} />{item.configurationFile}</li>)}</ul>
+          ) : <p className="muted">No supported infrastructure definitions detected.</p>}
+          <p className="card-note">Infrastructure is detected without starting containers or claiming external processes.</p>
         </div>
 
         <div className="detail-card detail-card-full">

@@ -13,11 +13,17 @@ import type { ProjectLinksActionResult, WorkspaceLinksActionResult } from "@/lib
 import { parseProjectLinksForm, parseWorkspaceLinksForm } from "@/lib/projects/project-links-validation";
 import { startDependencies, stopDependencies } from "@/lib/projects/dependencies";
 import { startDevServer, startPreviewServer, stopDevServer } from "@/lib/projects/processes";
+import { resolveProjectService } from "@/lib/projects/service-resolution";
 import { resolveSafeDestination, type ProjectType, validateGithubUrl } from "@/lib/projects/validation";
 import { getRepositoryFromSnapshot, refreshWorkspaceSnapshot } from "@/lib/workspace/snapshot";
 
 const REPOSITORY_ACTIONS = new Set<RepositoryAction>([
   "open-cursor", "open-intellij", "open-explorer", "open-terminal",
+  "start-dev", "start-preview", "stop-dev",
+  "start-dependencies", "stop-dependencies",
+  "run-test", "run-lint", "run-build", "run-verify",
+]);
+const SERVICE_ACTIONS = new Set<RepositoryAction>([
   "start-dev", "start-preview", "stop-dev",
   "start-dependencies", "stop-dependencies",
   "run-test", "run-lint", "run-build", "run-verify",
@@ -118,28 +124,32 @@ export async function createProjectAction(
   }
 }
 
-export async function runRepositoryAction(repositoryId: string, action: RepositoryAction): Promise<RepositoryActionResult> {
+export async function runRepositoryAction(repositoryId: string, action: RepositoryAction, serviceId?: string): Promise<RepositoryActionResult> {
   if (!REPOSITORY_ACTIONS.has(action) || !/^[A-Za-z0-9_-]{16}$/.test(repositoryId)) {
     return { status: "error", message: "That repository action is not available." };
   }
 
   const repository = await getRepositoryFromSnapshot(repositoryId);
   if (!repository) return { status: "error", message: "The repository is no longer in the workspace snapshot. Refresh the dashboard and try again." };
+  const service = resolveProjectService(repository, serviceId);
+  if (SERVICE_ACTIONS.has(action) && !service) {
+    return { status: "error", message: "That service action is not available. Refresh the project and try again." };
+  }
 
   switch (action) {
     case "open-cursor": return openInCursor(repository);
     case "open-intellij": return openInIntelliJ(repository);
     case "open-explorer": return openInExplorer(repository);
     case "open-terminal": return openTerminal(repository);
-    case "start-dev": return startDevServer(repository);
-    case "start-preview": return startPreviewServer(repository);
-    case "stop-dev": return stopDevServer(repository);
-    case "start-dependencies": return startDependencies(repository);
-    case "stop-dependencies": return stopDependencies(repository);
-    case "run-test": return runProjectCheck(repository, "test");
-    case "run-lint": return runProjectCheck(repository, "lint");
-    case "run-build": return runProjectCheck(repository, "build");
-    case "run-verify": return runProjectCheck(repository, "verify");
+    case "start-dev": return startDevServer(repository, service!);
+    case "start-preview": return startPreviewServer(repository, service!);
+    case "stop-dev": return stopDevServer(repository, service!);
+    case "start-dependencies": return startDependencies(repository, service!);
+    case "stop-dependencies": return stopDependencies(repository, service!);
+    case "run-test": return runProjectCheck(repository, service!, "test");
+    case "run-lint": return runProjectCheck(repository, service!, "lint");
+    case "run-build": return runProjectCheck(repository, service!, "build");
+    case "run-verify": return runProjectCheck(repository, service!, "verify");
   }
 }
 

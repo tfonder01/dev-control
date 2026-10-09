@@ -303,15 +303,24 @@ footer { display: flex; align-items: center; justify-content: center; gap: 7px; 
 .project-actions-heading { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding-bottom: 14px; border-bottom: 1px solid var(--border-soft); }
 .project-actions-heading .eyebrow { margin-bottom: 5px; font-size: 10px; }
 .project-actions-heading h2 { margin: 0; font-size: 15px; font-weight: 650; letter-spacing: -.01em; }
+.service-count { color: #7f8ca0; font: 11px var(--font-geist-mono); }
+.quick-action-group { padding-top: 15px; }
+.service-action-list { display: grid; gap: 12px; margin-top: 15px; }
+.service-action-card { min-width: 0; padding: 15px; border: 1px solid #263347; border-radius: 8px; background: #0c121b; }
+.service-action-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding-bottom: 13px; border-bottom: 1px solid var(--border-soft); }
+.service-action-heading .eyebrow { margin-bottom: 4px; font: 10px var(--font-geist-mono); overflow-wrap: anywhere; }
+.service-action-heading h3 { margin: 0; color: #d3dce7; font-size: 14px; font-weight: 650; }
+.service-stack { margin: 5px 0 0; color: #728096; font-size: 10px; }
+.service-action-body { display: grid; grid-template-columns: minmax(0, 1.45fr) minmax(220px, .55fr); gap: 20px; padding-top: 14px; }
+.service-action-body .action-group h4 { margin: 0 0 10px; color: #8390a2; font-size: 11px; font-weight: 650; letter-spacing: .07em; text-transform: uppercase; }
 .runtime-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border: 1px solid #334052; border-radius: 999px; color: #95a2b3; background: #111720; font-size: 11px; font-weight: 620; }
 .runtime-badge > span { width: 6px; height: 6px; border-radius: 50%; background: #657186; }
-.runtime-running, .runtime-starting { color: #75cea6; border-color: #28523e; background: rgba(44,122,88,.13); }
-.runtime-running > span, .runtime-starting > span { background: var(--green); box-shadow: 0 0 7px rgba(85,201,151,.55); }
+.runtime-running, .runtime-starting, .runtime-external { color: #75cea6; border-color: #28523e; background: rgba(44,122,88,.13); }
+.runtime-running > span, .runtime-starting > span, .runtime-external > span { background: var(--green); box-shadow: 0 0 7px rgba(85,201,151,.55); }
 .runtime-port-in-use { color: #e2ad6a; border-color: #5e4528; background: rgba(133,91,39,.14); }
 .runtime-port-in-use > span { background: var(--amber); }
 .runtime-failed { color: #d79a9a; border-color: #5b3439; background: rgba(116,47,56,.14); }
 .runtime-failed > span { background: #d17d85; }
-.project-action-groups { display: grid; grid-template-columns: 1.05fr 1fr 1fr; gap: 20px; padding-top: 15px; }
 .action-group { min-width: 0; }
 .action-group + .action-group { padding-left: 20px; border-left: 1px solid var(--border-soft); }
 .action-group h3 { margin: 0 0 10px; color: #8390a2; font-size: 11px; font-weight: 650; letter-spacing: .07em; text-transform: uppercase; }
@@ -459,7 +468,8 @@ footer { display: flex; align-items: center; justify-content: center; gap: 7px; 
   .project-link-row small { display: none; }
   .git-actions-layout { grid-template-columns: 1fr; }
   .git-commit-form { padding: 15px 0 0; border-top: 1px solid var(--border-soft); border-left: 0; }
-  .project-action-groups { grid-template-columns: 1fr; }
+  .service-action-heading { align-items: flex-start; flex-direction: column; }
+  .service-action-body { grid-template-columns: 1fr; }
   .action-group + .action-group { padding: 15px 0 0; border-top: 1px solid var(--border-soft); border-left: 0; }
   .action-result > div { align-items: flex-start; flex-direction: column; gap: 4px; }
   .detail-grid { grid-template-columns: 1fr; }

@@ -1,28 +1,26 @@
-import "server-only";
-
-import { access, readFile, readdir } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { access, opendir, readFile, readdir, stat } from "node:fs/promises";
 import path from "node:path";
 
-import type { PackageManager, ProjectCapabilities, ProjectCommand, ProjectScript, Technology } from "./types";
+import { MAX_SCAN_DEPTH, SKIPPED_DIRECTORIES } from "./scan-rules.ts";
+import type {
+  InfrastructureDefinition,
+  JavaBuildTool,
+  PackageManager,
+  ProjectCapabilities,
+  ProjectCommand,
+  ProjectScript,
+  ProjectService,
+  Technology,
+} from "./types";
 
-const CONFIGURATION_MARKERS = [
-  "package.json",
-  "pom.xml",
-  "Dockerfile",
-  "docker-compose.yml",
-  "docker-compose.yaml",
-  "compose.yml",
-  "compose.yaml",
-  "AGENTS.md",
-  "CLAUDE.md",
-  "README.md",
-  "README.MD",
-  ".env",
-  ".env.local",
-  ".env.development",
-  "devhub.yml",
-  "devhub.yaml",
-] as const;
+const SERVICE_SCAN_LIMIT = 5_000;
+const COMPOSE_FILES = ["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"] as const;
+const INFORMATIONAL_MARKERS = ["AGENTS.md", "CLAUDE.md", "README.md", "README.MD", ".env", ".env.local", ".env.development", "devhub.yml", "devhub.yaml"] as const;
+
+function opaqueId(kind: string, relativePath: string) {
+  return createHash("sha256").update(`${kind}:${relativePath.toLowerCase()}`).digest("base64url").slice(0, 16);
+}
 
 async function exists(filePath: string) {
   try {
@@ -33,10 +31,22 @@ async function exists(filePath: string) {
   }
 }
 
-function addTechnology(technologies: Technology[], technology: Technology) {
-  if (!technologies.some((item) => item.name === technology.name)) {
-    technologies.push(technology);
+async function isNestedRepository(directoryPath: string, repositoryPath: string) {
+  if (directoryPath === repositoryPath) return false;
+  try {
+    const marker = await stat(path.join(/* turbopackIgnore: true */ directoryPath, ".git"));
+    return marker.isDirectory() || marker.isFile();
+  } catch {
+    return false;
   }
+}
+
+function repositoryRelative(repositoryPath: string, targetPath: string) {
+  return path.relative(repositoryPath, targetPath).replaceAll(path.sep, "/") || ".";
+}
+
+function addTechnology(technologies: Technology[], technology: Technology) {
+  if (!technologies.some((item) => item.name === technology.name)) technologies.push(technology);
 }
 
 function detectDevPort(script: string, isNextJs: boolean) {
@@ -46,11 +56,7 @@ function detectDevPort(script: string, isNextJs: boolean) {
     const port = Number(explicitPort);
     if (port >= 1 && port <= 65_535) return { port, source: "script" as const };
   }
-
-  if (isNextJs && /(?:^|\s)next(?:\s|$)/i.test(script)) {
-    return { port: 3000, source: "framework-default" as const };
-  }
-
+  if (isNextJs && /(?:^|\s)next(?:\s|$)/i.test(script)) return { port: 3000, source: "framework-default" as const };
   return { port: null, source: null };
 }
 
@@ -97,8 +103,8 @@ async function readOptional(filePath: string) {
   }
 }
 
-async function detectSpringBootPort(repositoryPath: string) {
-  const resources = path.join(/* turbopackIgnore: true */ repositoryPath, "src", "main", "resources");
+async function detectSpringBootPort(servicePath: string) {
+  const resources = path.join(/* turbopackIgnore: true */ servicePath, "src", "main", "resources");
   const baseFiles = ["application.properties", "application.yml", "application.yaml"];
   let activeProfile: string | null = null;
   let basePort: number | null = null;
@@ -107,11 +113,8 @@ async function detectSpringBootPort(repositoryPath: string) {
     const contents = await readOptional(path.join(/* turbopackIgnore: true */ resources, file));
     if (!contents) continue;
     const isProperties = file.endsWith(".properties");
-    const port = validPort(isProperties
-      ? propertiesValue(contents, "server.port")
-      : yamlValue(contents, ["server", "port"]) ?? yamlValue(contents, ["server.port"]));
+    const port = validPort(isProperties ? propertiesValue(contents, "server.port") : yamlValue(contents, ["server", "port"]) ?? yamlValue(contents, ["server.port"]));
     if (port && !basePort) basePort = port;
-
     const configuredProfile = configuredValue(isProperties
       ? propertiesValue(contents, "spring.profiles.active") ?? ""
       : yamlValue(contents, ["spring", "profiles", "active"]) ?? yamlValue(contents, ["spring.profiles.active"]) ?? "");
@@ -122,133 +125,223 @@ async function detectSpringBootPort(repositoryPath: string) {
     for (const extension of ["properties", "yml", "yaml"]) {
       const contents = await readOptional(path.join(/* turbopackIgnore: true */ resources, `application-${activeProfile}.${extension}`));
       if (!contents) continue;
-      const port = validPort(extension === "properties"
-        ? propertiesValue(contents, "server.port")
-        : yamlValue(contents, ["server", "port"]) ?? yamlValue(contents, ["server.port"]));
+      const port = validPort(extension === "properties" ? propertiesValue(contents, "server.port") : yamlValue(contents, ["server", "port"]) ?? yamlValue(contents, ["server.port"]));
       if (port) return { port, source: "spring-config" as const };
     }
   }
-
   if (basePort) return { port: basePort, source: "spring-config" as const };
   return { port: 8080, source: "framework-default" as const };
 }
 
-export async function detectStack(repositoryPath: string) {
-  const technologies: Technology[] = [];
-  const commands: ProjectCommand[] = [];
-  const configurationFiles: string[] = [];
-  const capabilities: ProjectCapabilities = {
+async function springConfigurationFiles(repositoryPath: string, servicePath: string) {
+  try {
+    return (await readdir(path.join(/* turbopackIgnore: true */ servicePath, "src", "main", "resources")))
+      .filter((file) => /^application(?:-[A-Za-z0-9_-]+)?\.(?:properties|ya?ml)$/.test(file))
+      .sort()
+      .map((file) => repositoryRelative(repositoryPath, path.join(servicePath, "src", "main", "resources", file)));
+  } catch {
+    return [];
+  }
+}
+
+async function packageManager(repositoryPath: string, servicePath: string, declared?: string): Promise<PackageManager> {
+  const declaredManager = declared?.split("@")[0];
+  if (declaredManager === "pnpm" || declaredManager === "npm" || declaredManager === "yarn") return declaredManager;
+  for (const directory of servicePath === repositoryPath ? [servicePath] : [servicePath, repositoryPath]) {
+    if (await exists(path.join(directory, "pnpm-lock.yaml"))) return "pnpm";
+    if (await exists(path.join(directory, "package-lock.json"))) return "npm";
+    if (await exists(path.join(directory, "yarn.lock"))) return "yarn";
+  }
+  return "npm";
+}
+
+function emptyCapabilities(): ProjectCapabilities {
+  return {
     packageManager: null,
     packageScripts: [],
     hasMavenWrapper: false,
+    hasGradleWrapper: false,
     hasSpringBoot: false,
+    javaBuildTool: null,
     devPortHint: null,
     devPortSource: null,
   };
+}
 
-  const markerResults = await Promise.all(
-    CONFIGURATION_MARKERS.map(async (marker) => ({
-      marker,
-      present: await exists(path.join(/* turbopackIgnore: true */ repositoryPath, marker)),
-    })),
-  );
-
-  for (const result of markerResults) {
-    if (result.present && !configurationFiles.some((item) => item.toLowerCase() === result.marker.toLowerCase())) {
-      configurationFiles.push(result.marker);
+async function detectNodeService(repositoryPath: string, servicePath: string): Promise<ProjectService | null> {
+  const packagePath = path.join(/* turbopackIgnore: true */ servicePath, "package.json");
+  if (!await exists(packagePath)) return null;
+  try {
+    const packageJson = JSON.parse(await readFile(packagePath, "utf8")) as {
+      name?: string;
+      packageManager?: string;
+      dependencies?: Record<string, string>;
+      devDependencies?: Record<string, string>;
+      scripts?: Record<string, string>;
+    };
+    const dependencies = { ...packageJson.dependencies, ...packageJson.devDependencies };
+    const scripts = packageJson.scripts ?? {};
+    const manager = await packageManager(repositoryPath, servicePath, packageJson.packageManager);
+    const technologies: Technology[] = [{ name: "Node.js", tone: "green" }];
+    if (dependencies.next) addTechnology(technologies, { name: "Next.js", tone: "slate" });
+    if (dependencies.react) addTechnology(technologies, { name: "React", tone: "cyan" });
+    addTechnology(technologies, { name: manager, tone: "orange" });
+    const capabilities = emptyCapabilities();
+    capabilities.packageManager = manager;
+    const commands: ProjectCommand[] = [];
+    for (const script of ["dev", "start", "test", "lint", "build"] satisfies ProjectScript[]) {
+      if (!scripts[script]) continue;
+      capabilities.packageScripts.push(script);
+      commands.push({ label: script, command: `${manager} ${manager === "npm" ? "run " : ""}${script}` });
     }
+    if (scripts.dev) {
+      const detectedPort = detectDevPort(scripts.dev, Boolean(dependencies.next));
+      capabilities.devPortHint = detectedPort.port;
+      capabilities.devPortSource = detectedPort.source;
+    }
+    const relativePath = repositoryRelative(repositoryPath, servicePath);
+    return {
+      id: opaqueId("node", relativePath),
+      name: packageJson.name?.trim() || (relativePath === "." ? path.basename(repositoryPath) : path.basename(servicePath)),
+      path: servicePath,
+      relativePath,
+      kind: "node",
+      technologies,
+      configurationFiles: [repositoryRelative(repositoryPath, packagePath)],
+      commands,
+      capabilities,
+    };
+  } catch {
+    return null;
   }
+}
 
-  const packagePath = path.join(/* turbopackIgnore: true */ repositoryPath, "package.json");
-  if (await exists(packagePath)) {
-    addTechnology(technologies, { name: "Node.js", tone: "green" });
+async function springBuildTool(servicePath: string): Promise<{ tool: JavaBuildTool; buildFile: string; contents: string } | null> {
+  const pom = path.join(/* turbopackIgnore: true */ servicePath, "pom.xml");
+  const pomContents = await readOptional(pom);
+  if (pomContents && /spring-boot/i.test(pomContents)) return { tool: "maven", buildFile: pom, contents: pomContents };
+  for (const name of ["build.gradle", "build.gradle.kts"]) {
+    const buildFile = path.join(/* turbopackIgnore: true */ servicePath, name);
+    const contents = await readOptional(buildFile);
+    if (contents && /org\.springframework\.boot|spring-boot/i.test(contents)) return { tool: "gradle", buildFile, contents };
+  }
+  return null;
+}
 
+async function detectSpringService(repositoryPath: string, servicePath: string): Promise<ProjectService | null> {
+  const build = await springBuildTool(servicePath);
+  if (!build) return null;
+  const relativePath = repositoryRelative(repositoryPath, servicePath);
+  const capabilities = emptyCapabilities();
+  capabilities.hasSpringBoot = true;
+  capabilities.javaBuildTool = build.tool;
+  capabilities.hasMavenWrapper = build.tool === "maven" && (await exists(path.join(servicePath, "mvnw.cmd")) || await exists(path.join(servicePath, "mvnw")));
+  capabilities.hasGradleWrapper = build.tool === "gradle" && (await exists(path.join(servicePath, "gradlew.bat")) || await exists(path.join(servicePath, "gradlew")));
+  const port = await detectSpringBootPort(servicePath);
+  capabilities.devPortHint = port.port;
+  capabilities.devPortSource = port.source;
+  const technologies: Technology[] = [{ name: "Java", tone: "orange" }];
+  addTechnology(technologies, { name: build.tool === "maven" ? "Maven" : "Gradle", tone: "purple" });
+  addTechnology(technologies, { name: "Spring Boot", tone: "green" });
+  const launcher = build.tool === "maven"
+    ? capabilities.hasMavenWrapper ? (process.platform === "win32" ? ".\\mvnw.cmd" : "./mvnw") : "mvn"
+    : capabilities.hasGradleWrapper ? (process.platform === "win32" ? ".\\gradlew.bat" : "./gradlew") : "gradle";
+  const commands = build.tool === "maven"
+    ? [{ label: "test", command: `${launcher} test` }, { label: "verify", command: `${launcher} verify` }]
+    : [{ label: "test", command: `${launcher} test` }, { label: "build", command: `${launcher} build` }];
+  return {
+    id: opaqueId("spring-boot", relativePath),
+    name: relativePath === "." ? path.basename(repositoryPath) : path.basename(servicePath),
+    path: servicePath,
+    relativePath,
+    kind: "spring-boot",
+    technologies,
+    configurationFiles: [repositoryRelative(repositoryPath, build.buildFile), ...await springConfigurationFiles(repositoryPath, servicePath)],
+    commands,
+    capabilities,
+  };
+}
+
+async function scanDirectories(repositoryPath: string) {
+  const directories: string[] = [];
+  const queue = [{ directoryPath: repositoryPath, depth: 0 }];
+  let visited = 0;
+  while (queue.length > 0 && visited < SERVICE_SCAN_LIMIT) {
+    const current = queue.shift();
+    if (!current) break;
+    visited += 1;
+    if (await isNestedRepository(current.directoryPath, repositoryPath)) continue;
+    directories.push(current.directoryPath);
+    if (current.depth >= MAX_SCAN_DEPTH) continue;
     try {
-      const packageJson = JSON.parse(await readFile(packagePath, "utf8")) as {
-        dependencies?: Record<string, string>;
-        devDependencies?: Record<string, string>;
-        scripts?: Record<string, string>;
-      };
-      const dependencies = { ...packageJson.dependencies, ...packageJson.devDependencies };
-
-      if (dependencies.next) addTechnology(technologies, { name: "Next.js", tone: "slate" });
-      if (dependencies.react) addTechnology(technologies, { name: "React", tone: "cyan" });
-
-      const packageManager: PackageManager = (await exists(path.join(/* turbopackIgnore: true */ repositoryPath, "pnpm-lock.yaml")))
-        ? "pnpm"
-        : (await exists(path.join(/* turbopackIgnore: true */ repositoryPath, "package-lock.json")))
-          ? "npm"
-          : (await exists(path.join(/* turbopackIgnore: true */ repositoryPath, "yarn.lock")))
-            ? "yarn"
-            : "npm";
-
-      addTechnology(technologies, { name: packageManager, tone: "orange" });
-      capabilities.packageManager = packageManager;
-
-      for (const script of ["dev", "start", "test", "lint", "build"] satisfies ProjectScript[]) {
-        if (packageJson.scripts?.[script]) {
-          capabilities.packageScripts.push(script);
-          commands.push({ label: script, command: `${packageManager} ${packageManager === "npm" ? "run " : ""}${script}` });
-        }
-      }
-
-      if (packageJson.scripts?.dev) {
-        const detectedPort = detectDevPort(packageJson.scripts.dev, Boolean(dependencies.next));
-        capabilities.devPortHint = detectedPort.port;
-        capabilities.devPortSource = detectedPort.source;
+      const directory = await opendir(current.directoryPath);
+      for await (const entry of directory) {
+        if (!entry.isDirectory() || entry.isSymbolicLink() || entry.name === ".git" || SKIPPED_DIRECTORIES.has(entry.name)) continue;
+        queue.push({ directoryPath: path.join(/* turbopackIgnore: true */ current.directoryPath, entry.name), depth: current.depth + 1 });
       }
     } catch {
-      // A malformed package file should not prevent the repository from appearing.
+      // One unreadable service directory must not hide the repository.
+    }
+  }
+  return directories;
+}
+
+export async function detectStack(repositoryPath: string) {
+  const directories = await scanDirectories(repositoryPath);
+  const services: ProjectService[] = [];
+  const infrastructure: InfrastructureDefinition[] = [];
+  const technologies: Technology[] = [];
+  const configurationFiles: string[] = [];
+
+  for (const directory of directories) {
+    const [node, spring] = await Promise.all([
+      detectNodeService(repositoryPath, directory),
+      detectSpringService(repositoryPath, directory),
+    ]);
+    for (const service of [node, spring]) {
+      if (!service) continue;
+      services.push(service);
+      service.technologies.forEach((technology) => addTechnology(technologies, technology));
+      configurationFiles.push(...service.configurationFiles);
+    }
+
+    for (const composeFile of COMPOSE_FILES) {
+      const composePath = path.join(/* turbopackIgnore: true */ directory, composeFile);
+      if (!await exists(composePath)) continue;
+      const relativePath = repositoryRelative(repositoryPath, composePath);
+      infrastructure.push({
+        id: opaqueId("docker-compose", relativePath),
+        name: path.basename(directory) === path.basename(repositoryPath) ? "Docker Compose" : path.basename(directory),
+        path: directory,
+        relativePath: repositoryRelative(repositoryPath, directory),
+        kind: "docker-compose",
+        configurationFile: relativePath,
+      });
+      configurationFiles.push(relativePath);
+      addTechnology(technologies, { name: "Docker Compose", tone: "blue" });
+    }
+
+    const dockerfile = path.join(/* turbopackIgnore: true */ directory, "Dockerfile");
+    if (await exists(dockerfile)) {
+      configurationFiles.push(repositoryRelative(repositoryPath, dockerfile));
+      addTechnology(technologies, { name: "Docker", tone: "blue" });
+    }
+    if (await exists(path.join(directory, "pyproject.toml")) || await exists(path.join(directory, "requirements.txt"))) {
+      addTechnology(technologies, { name: "Python", tone: "blue" });
     }
   }
 
-  const pomPath = path.join(/* turbopackIgnore: true */ repositoryPath, "pom.xml");
-  if (await exists(pomPath)) {
-    addTechnology(technologies, { name: "Java", tone: "orange" });
-    addTechnology(technologies, { name: "Maven", tone: "purple" });
-
-    try {
-      const pom = await readFile(pomPath, "utf8");
-      if (/spring-boot/i.test(pom)) {
-        addTechnology(technologies, { name: "Spring Boot", tone: "green" });
-        capabilities.hasSpringBoot = true;
-        const detectedPort = await detectSpringBootPort(repositoryPath);
-        capabilities.devPortHint = detectedPort.port;
-        capabilities.devPortSource = detectedPort.source;
-      }
-    } catch {
-      // Presence still identifies a Maven/Java project.
-    }
-
-    capabilities.hasMavenWrapper = await exists(path.join(/* turbopackIgnore: true */ repositoryPath, "mvnw.cmd"));
-    const wrapper = capabilities.hasMavenWrapper ? ".\\mvnw.cmd" : "mvn";
-    commands.push(
-      { label: "test", command: `${wrapper} test` },
-      { label: "verify", command: `${wrapper} verify` },
-    );
-
-    try {
-      const springConfigurationFiles = (await readdir(path.join(/* turbopackIgnore: true */ repositoryPath, "src", "main", "resources")))
-        .filter((file) => /^application(?:-[A-Za-z0-9_-]+)?\.(?:properties|ya?ml)$/.test(file))
-        .sort()
-        .map((file) => `src/main/resources/${file}`);
-      configurationFiles.push(...springConfigurationFiles);
-    } catch {
-      // Spring configuration discovery is informational and must not block scanning.
-    }
+  for (const marker of INFORMATIONAL_MARKERS) {
+    const markerPath = path.join(/* turbopackIgnore: true */ repositoryPath, marker);
+    if (await exists(markerPath)) configurationFiles.push(marker);
   }
 
-  if (await exists(path.join(/* turbopackIgnore: true */ repositoryPath, "Dockerfile"))) {
-    addTechnology(technologies, { name: "Docker", tone: "blue" });
-  }
-
-  if (["docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"].some((file) => configurationFiles.includes(file))) {
-    addTechnology(technologies, { name: "Docker Compose", tone: "blue" });
-  }
-
-  if (await exists(path.join(/* turbopackIgnore: true */ repositoryPath, "pyproject.toml")) || await exists(path.join(/* turbopackIgnore: true */ repositoryPath, "requirements.txt"))) {
-    addTechnology(technologies, { name: "Python", tone: "blue" });
-  }
-
-  return { technologies, configurationFiles, commands, capabilities };
+  services.sort((left, right) => left.relativePath.localeCompare(right.relativePath) || left.kind.localeCompare(right.kind));
+  infrastructure.sort((left, right) => left.configurationFile.localeCompare(right.configurationFile));
+  return {
+    technologies,
+    configurationFiles: [...new Set(configurationFiles)].sort(),
+    services,
+    infrastructure,
+  };
 }

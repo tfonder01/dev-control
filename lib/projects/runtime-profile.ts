@@ -18,7 +18,7 @@ import {
   parseYamlScalars,
   resolvePlaceholders,
 } from "./runtime-config";
-import type { Repository } from "@/lib/workspace/types";
+import type { ProjectService, Repository } from "@/lib/workspace/types";
 import type { ComposeDependencyDefinition } from "./runtime-config";
 
 const ENV_FILES = [".env", ".env.local"] as const;
@@ -34,8 +34,10 @@ export type ResolvedSpringRuntime = {
 };
 
 export type ResolvedComposeDependencies = {
+  infrastructureId: string | null;
   composeFile: string;
   composePath: string;
+  composeDirectory: string;
   services: ComposeDependencyDefinition[];
 };
 
@@ -100,31 +102,38 @@ function configValue(files: Record<string, string>, key: string, environment: No
   return undefined;
 }
 
-export async function resolveSpringRuntime(repository: Repository): Promise<ResolvedSpringRuntime> {
-  const configPath = (await Promise.all(["devhub.yaml", "devhub.yml"].map(async (name) => {
-    const file = path.join(/* turbopackIgnore: true */ repository.path, name);
+export async function resolveSpringRuntime(repository: Repository, service: ProjectService): Promise<ResolvedSpringRuntime> {
+  const configDirectories = service.path === repository.path ? [service.path] : [service.path, repository.path];
+  const configPath = (await Promise.all(configDirectories.flatMap((directory) => ["devhub.yaml", "devhub.yml"].map(async (name) => {
+    const file = path.join(/* turbopackIgnore: true */ directory, name);
     return await exists(file) ? file : null;
-  }))).find(Boolean) ?? null;
+  })))).find(Boolean) ?? null;
   const runtimeConfig = configPath ? parseDevHubConfig(await readFile(/* turbopackIgnore: true */ configPath, "utf8")) : parseDevHubConfig("");
   const environment: NodeJS.ProcessEnv = { ...process.env };
   const loadedFiles: string[] = [];
   let configuredEnvironmentError: string | null = null;
 
-  for (const name of ENV_FILES) {
-    const file = await trustedFile(repository.path, name);
-    if (!file) continue;
-    Object.assign(environment, parseEnvFile(await readFile(/* turbopackIgnore: true */ file, "utf8")));
-    loadedFiles.push(name);
+  const environmentDirectories = service.path === repository.path ? [repository.path] : [repository.path, service.path];
+  for (const directory of environmentDirectories) {
+    for (const name of ENV_FILES) {
+      const relativeFile = path.relative(repository.path, path.join(/* turbopackIgnore: true */ directory, name)).replaceAll(path.sep, "/") || name;
+      const file = await trustedFile(repository.path, relativeFile);
+      if (!file) continue;
+      Object.assign(environment, parseEnvFile(await readFile(/* turbopackIgnore: true */ file, "utf8")));
+      loadedFiles.push(relativeFile);
+    }
   }
   if (runtimeConfig.envFile) {
-    const configuredFile = await trustedFile(repository.path, runtimeConfig.envFile);
+    const configBase = configPath ? path.dirname(configPath) : service.path;
+    const configuredRelativePath = path.relative(repository.path, path.resolve(configBase, runtimeConfig.envFile)).replaceAll(path.sep, "/");
+    const configuredFile = await trustedFile(repository.path, configuredRelativePath);
     if (configuredFile) {
       Object.assign(environment, parseEnvFile(await readFile(/* turbopackIgnore: true */ configuredFile, "utf8")));
-      loadedFiles.push(runtimeConfig.envFile);
+      loadedFiles.push(configuredRelativePath);
     } else configuredEnvironmentError = `Configured environment file ${runtimeConfig.envFile} is missing or outside the repository.`;
   }
 
-  const resources = path.join(/* turbopackIgnore: true */ repository.path, "src", "main", "resources");
+  const resources = path.join(/* turbopackIgnore: true */ service.path, "src", "main", "resources");
   const springFiles: Record<string, string> = {};
   for (const name of SPRING_BASE_FILES) {
     const contents = await readOptional(path.join(/* turbopackIgnore: true */ resources, name));
@@ -152,14 +161,29 @@ export async function resolveSpringRuntime(repository: Repository): Promise<Reso
   const configuredEndpoint = databaseEndpoint(configuredDatasourceValue);
 
   let dependencies: ResolvedComposeDependencies | null = null;
-  for (const name of COMPOSE_FILES) {
-    const composePath = await trustedFile(repository.path, name);
+  const colocatedCompose = COMPOSE_FILES.map((name) => ({
+    id: null,
+    relativePath: path.relative(repository.path, path.join(/* turbopackIgnore: true */ service.path, name)).replaceAll(path.sep, "/") || name,
+  }));
+  const infrastructureCompose = repository.infrastructure.length === 1
+    ? [{ id: repository.infrastructure[0].id, relativePath: repository.infrastructure[0].configurationFile }]
+    : [];
+  const composeCandidates = [...colocatedCompose, ...infrastructureCompose]
+    .filter((candidate, index, candidates) => candidates.findIndex((item) => item.relativePath.toLowerCase() === candidate.relativePath.toLowerCase()) === index);
+  for (const candidate of composeCandidates) {
+    const composePath = await trustedFile(repository.path, candidate.relativePath);
     if (!composePath) continue;
     const contents = await readOptional(composePath);
     if (contents === null) continue;
     const services = parseComposeDependencies(contents, environment);
     if (services.length) {
-      dependencies = { composeFile: name, composePath, services };
+      dependencies = {
+        infrastructureId: candidate.id,
+        composeFile: candidate.relativePath,
+        composePath,
+        composeDirectory: path.dirname(composePath),
+        services,
+      };
       break;
     }
   }
@@ -248,7 +272,7 @@ export async function resolveSpringRuntime(repository: Repository): Promise<Reso
     : databaseUrlMissing
       ? "A PostgreSQL datasource URL is not configured for this local launch."
     : endpoint && dependencies?.services.some((service) => service.service.toLowerCase() === endpoint.host.toLowerCase())
-      ? `The datasource host ${endpoint.host} is a Docker Compose service name and is not available to a host Maven launch. Configure a host-local datasource URL, then retry.`
+      ? `The datasource host ${endpoint.host} is a Docker Compose service name and is not available to a host Spring Boot launch. Configure a host-local datasource URL, then retry.`
     : databaseBlocked && endpoint?.local
       ? `PostgreSQL is not reachable at ${endpoint.host}:${endpoint.port}. Start your local database, then retry.`
       : databaseBlocked
@@ -259,7 +283,7 @@ export async function resolveSpringRuntime(repository: Repository): Promise<Reso
     .map(([, value]) => value!);
   const environmentPort = Number(environment.SERVER_PORT ?? environment.APP_PORT ?? environment.PORT);
   const configuredPort = runtimeConfig.port
-    ?? (Number.isSafeInteger(environmentPort) ? environmentPort : repository.capabilities.devPortHint);
+    ?? (Number.isSafeInteger(environmentPort) ? environmentPort : service.capabilities.devPortHint);
 
   return {
     environment,

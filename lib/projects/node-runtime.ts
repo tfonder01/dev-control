@@ -6,7 +6,7 @@ import path from "node:path";
 import type { NodeLaunchMode, NodeRuntimeProfile, NodeRuntimeProfiles } from "./action-types";
 import { createBoundedRuntimeEnvironment } from "./runtime-environment";
 import { isNodeProfileSelector, isSensitiveEnvironmentName, parseEnvFile, safeProfileState } from "./runtime-config";
-import type { Repository } from "@/lib/workspace/types";
+import type { ProjectService } from "@/lib/workspace/types";
 
 type ResolvedNodeRuntime = {
   status: NodeRuntimeProfile;
@@ -27,13 +27,13 @@ async function readOptional(filePath: string) {
   }
 }
 
-export async function resolveNodeRuntime(repository: Repository, mode: NodeLaunchMode): Promise<ResolvedNodeRuntime> {
+export async function resolveNodeRuntime(service: ProjectService, mode: NodeLaunchMode): Promise<ResolvedNodeRuntime> {
   const resolved: Record<string, string> = {};
   const sources = new Map<string, string>();
   const redactions = new Set<string>();
 
   for (const file of envFiles(mode)) {
-    const contents = await readOptional(path.join(/* turbopackIgnore: true */ repository.path, file));
+    const contents = await readOptional(path.join(/* turbopackIgnore: true */ service.path, file));
     if (contents === null) continue;
     for (const [name, value] of Object.entries(parseEnvFile(contents))) {
       resolved[name] = value;
@@ -71,10 +71,10 @@ export async function resolveNodeRuntime(repository: Repository, mode: NodeLaunc
   return { status, environment: environment as NodeJS.ProcessEnv, redactions: [...redactions] };
 }
 
-export async function resolveNodeRuntimeProfiles(repository: Repository): Promise<NodeRuntimeProfiles> {
+export async function resolveNodeRuntimeProfiles(service: ProjectService): Promise<NodeRuntimeProfiles> {
   const [dev, preview] = await Promise.all([
-    resolveNodeRuntime(repository, "dev"),
-    resolveNodeRuntime(repository, "preview"),
+    resolveNodeRuntime(service, "dev"),
+    resolveNodeRuntime(service, "preview"),
   ]);
   return { dev: dev.status, preview: preview.status };
 }

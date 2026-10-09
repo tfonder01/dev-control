@@ -3,6 +3,7 @@ import "server-only";
 import { spawn } from "node:child_process";
 
 import type { RepositoryActionResult } from "./action-types";
+import { javaCheckCommand, packageScriptCommand, requiresWindowsCommandShell } from "./service-commands";
 import {
   discoverCursor,
   discoverIntelliJ,
@@ -11,7 +12,7 @@ import {
   discoveryFailure,
   launchWindowsTool,
 } from "./windows-tools";
-import type { PackageManager, ProjectScript, Repository } from "@/lib/workspace/types";
+import type { ProjectScript, ProjectService, Repository } from "@/lib/workspace/types";
 
 const MAX_OUTPUT_CHARS = 24_000;
 const CHECK_TIMEOUT_MS = 10 * 60_000;
@@ -91,19 +92,14 @@ export async function openTerminal(repository: Repository): Promise<RepositoryAc
   }
 }
 
-function packageCheckCommand(packageManager: PackageManager, script: ProjectScript) {
-  const executable = `${packageManager}${process.platform === "win32" ? ".cmd" : ""}`;
-  return { executable, args: packageManager === "npm" ? ["run", script] : [script] };
-}
-
-async function executeAllowlisted(repository: Repository, executable: string, args: string[]): Promise<RepositoryActionResult> {
+async function executeAllowlisted(service: ProjectService, executable: string, args: string[]): Promise<RepositoryActionResult> {
   const started = performance.now();
   return new Promise((resolve) => {
-    const command = process.platform === "win32" && executable.endsWith(".cmd")
+    const command = requiresWindowsCommandShell(executable)
       ? { executable: process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe", args: ["/d", "/s", "/c", executable, ...args] }
       : { executable, args };
     const child = spawn(/* turbopackIgnore: true */ command.executable, command.args, {
-      cwd: repository.path,
+      cwd: service.path,
       env: { ...process.env, CI: "1", NO_COLOR: "1", FORCE_COLOR: "0" },
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
@@ -152,22 +148,20 @@ async function executeAllowlisted(repository: Repository, executable: string, ar
   });
 }
 
-export async function runProjectCheck(repository: Repository, check: "test" | "lint" | "build" | "verify") {
-  if (check === "verify") {
-    if (!repository.capabilities.hasMavenWrapper) return { status: "error", message: "No Maven wrapper was detected." } satisfies RepositoryActionResult;
-    return executeAllowlisted(repository, process.platform === "win32" ? ".\\mvnw.cmd" : "./mvnw", ["verify"]);
+export async function runProjectCheck(_repository: Repository, service: ProjectService, check: "test" | "lint" | "build" | "verify") {
+  if (service.kind === "spring-boot") {
+    if (check === "lint") return { status: "error", message: "This service does not expose an allowlisted lint action." } satisfies RepositoryActionResult;
+    const command = javaCheckCommand(service, check);
+    if (command) return executeAllowlisted(service, command.executable, command.args);
+    return { status: "error", message: `This service does not expose an allowlisted ${check} action.` } satisfies RepositoryActionResult;
   }
 
-  if (repository.capabilities.packageScripts.includes(check)) {
-    const packageManager = repository.capabilities.packageManager;
+  if (service.capabilities.packageScripts.includes(check as ProjectScript)) {
+    const packageManager = service.capabilities.packageManager;
     if (!packageManager) return { status: "error", message: "No supported package manager was detected." } satisfies RepositoryActionResult;
-    const command = packageCheckCommand(packageManager, check);
-    return executeAllowlisted(repository, command.executable, command.args);
+    const command = packageScriptCommand(service, check as ProjectScript);
+    return executeAllowlisted(service, command.executable, command.args);
   }
 
-  if (check === "test" && repository.capabilities.hasMavenWrapper) {
-    return executeAllowlisted(repository, process.platform === "win32" ? ".\\mvnw.cmd" : "./mvnw", ["test"]);
-  }
-
-  return { status: "error", message: `This repository does not expose an allowlisted ${check} action.` } satisfies RepositoryActionResult;
+  return { status: "error", message: `This service does not expose an allowlisted ${check} action.` } satisfies RepositoryActionResult;
 }

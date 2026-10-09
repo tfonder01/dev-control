@@ -5,17 +5,11 @@ import { opendir, stat } from "node:fs/promises";
 import path from "node:path";
 
 import { readGitMetadata } from "./git";
+import { MAX_DIRECTORIES, MAX_SCAN_DEPTH, SKIPPED_DIRECTORIES } from "./scan-rules";
 import { detectStack } from "./stack-detector";
 import type { Repository, WorkspaceScanResult } from "./types";
 
-const MAX_SCAN_DEPTH = 6;
-const MAX_DIRECTORIES = 20_000;
 const METADATA_CONCURRENCY = 6;
-const SKIPPED_DIRECTORIES = new Set([
-  ".next", ".idea", ".vscode", ".gradle", ".mvn", ".turbo", ".cache",
-  "node_modules", "target", "build", "dist", "coverage", "out", "vendor",
-  "venv", ".venv", "__pycache__",
-]);
 
 function repositoryId(relativePath: string) {
   return createHash("sha256").update(relativePath.toLowerCase()).digest("base64url").slice(0, 16);
@@ -115,8 +109,8 @@ export async function scanWorkspace(): Promise<WorkspaceScanResult> {
       relativePath,
       technologies: stack.technologies,
       configurationFiles: stack.configurationFiles,
-      commands: stack.commands,
-      capabilities: stack.capabilities,
+      services: stack.services,
+      infrastructure: stack.infrastructure,
       git,
     };
   });
