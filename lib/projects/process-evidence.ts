@@ -6,6 +6,11 @@ export type WindowsProcessEvidence = {
   commandLine: string | null;
 };
 
+export type WindowsListenerSnapshot = {
+  listener: WindowsProcessEvidence;
+  processes: Map<number, WindowsProcessEvidence>;
+};
+
 export function sameWindowsProcess(
   left: WindowsProcessEvidence | undefined | null,
   right: WindowsProcessEvidence | undefined | null,
@@ -49,6 +54,16 @@ export function listenerBelongsToWindowsLaunch(
   const currentRoot = rootProcess ? processes.get(rootProcess.pid) : null;
   if (!rootProcess || !sameWindowsProcess(rootProcess, currentRoot)) return false;
   return isWindowsProcessDescendantOf(listener.pid, rootProcess.pid, processes);
+}
+
+export function consistentWindowsListenerSnapshot(
+  listenerPidBefore: number | null,
+  listenerPidAfter: number | null,
+  processes: Map<number, WindowsProcessEvidence> | null,
+): WindowsListenerSnapshot | null {
+  if (!listenerPidBefore || listenerPidBefore !== listenerPidAfter || !processes) return null;
+  const listener = processes.get(listenerPidBefore);
+  return listener ? { listener, processes } : null;
 }
 
 function normalizeWindowsValue(value: string) {

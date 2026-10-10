@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   classifyUnmanagedListener,
+  consistentWindowsListenerSnapshot,
   listenerBelongsToWindowsLaunch,
   listenerMatchesServicePath,
   type WindowsProcessEvidence,
@@ -114,4 +115,14 @@ test("keeps independent service listener trees isolated", () => {
   assert.equal(listenerBelongsToWindowsLaunch(processes.get(10001), apiRoot, null, processes), true);
   assert.equal(listenerBelongsToWindowsLaunch(processes.get(11001), apiRoot, null, processes), false);
   assert.equal(listenerBelongsToWindowsLaunch(processes.get(10001), workerRoot, null, processes), false);
+});
+
+test("accepts only a listener captured consistently around the process snapshot", () => {
+  const listener = process(12000, 11000, "C:\\Java\\bin\\java.exe", "com.example.Application --server.port=3001");
+  const processes = new Map([[listener.pid, listener]]);
+
+  assert.deepEqual(consistentWindowsListenerSnapshot(12000, 12000, processes), { listener, processes });
+  assert.equal(consistentWindowsListenerSnapshot(12000, 12001, processes), null);
+  assert.equal(consistentWindowsListenerSnapshot(12000, 12000, new Map()), null);
+  assert.equal(consistentWindowsListenerSnapshot(12000, 12000, null), null);
 });

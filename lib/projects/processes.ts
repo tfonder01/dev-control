@@ -11,10 +11,13 @@ import { findAvailablePort } from "./port-allocation";
 import {
   classifyUnmanagedListener,
   collectWindowsProcessTree,
+  consistentWindowsListenerSnapshot,
   listenerBelongsToWindowsLaunch,
   sameWindowsProcess,
   type WindowsProcessEvidence,
 } from "./process-evidence";
+import { trackedRuntimePort } from "./process-output";
+import { unverifiedWindowsOwnershipPolicy } from "./process-lifecycle-policy";
 import { classifySpringFailureOutput, redactRuntimeOutput } from "./runtime-config";
 import { resolveSpringRuntime } from "./runtime-profile";
 import { packageScriptCommand, requiresWindowsCommandShell, springLaunchArgs, springWrapperCommand } from "./service-commands";
@@ -25,6 +28,7 @@ const STARTUP_WAIT_MS = 8_000;
 const STOP_WAIT_MS = 5_000;
 const PORT_SEARCH_RANGE_SIZE = 20;
 const MAX_OUTPUT_CHARS = 24_000;
+const WINDOWS_OWNERSHIP_ATTEMPTS = 3;
 const execFileAsync = promisify(execFile);
 
 type ManagedProcess = {
@@ -65,9 +69,8 @@ function cleanOutput(value: string) {
 
 function appendOutput(entry: ManagedProcess, chunk: Buffer | string) {
   entry.output = redactRuntimeOutput(cleanOutput(`${entry.output}${chunk.toString()}`), entry.redactions).slice(-MAX_OUTPUT_CHARS);
-  const matches = [...entry.output.matchAll(/https?:\/\/(?:localhost|127\.0\.0\.1):([0-9]{1,5})/gi)];
-  const detected = Number(matches.at(-1)?.[1]);
-  if (detected >= 1 && detected <= 65_535 && entry.port !== detected) {
+  const detected = trackedRuntimePort(entry.port, entry.output);
+  if (detected && entry.port !== detected) {
     if (entry.port) runtime.reservedPorts.delete(entry.port);
     entry.port = detected;
     runtime.reservedPorts.add(detected);
@@ -216,19 +219,40 @@ async function readWindowsProcessTable() {
   }
 }
 
+async function readWindowsProcessTableWithRetry() {
+  for (let attempt = 0; attempt < WINDOWS_OWNERSHIP_ATTEMPTS; attempt += 1) {
+    const processes = await readWindowsProcessTable();
+    if (processes) return processes;
+    if (attempt + 1 < WINDOWS_OWNERSHIP_ATTEMPTS) {
+      await new Promise((resolve) => setTimeout(resolve, 75));
+    }
+  }
+  return null;
+}
+
+async function readWindowsListenerSnapshot(port: number) {
+  for (let attempt = 0; attempt < WINDOWS_OWNERSHIP_ATTEMPTS; attempt += 1) {
+    const listenerPidBefore = await findWindowsListenerPid(port);
+    const processes = await readWindowsProcessTable();
+    const listenerPidAfter = await findWindowsListenerPid(port);
+    const snapshot = consistentWindowsListenerSnapshot(listenerPidBefore, listenerPidAfter, processes);
+    if (snapshot) return snapshot;
+    if (attempt + 1 < WINDOWS_OWNERSHIP_ATTEMPTS) {
+      await new Promise((resolve) => setTimeout(resolve, 75));
+    }
+  }
+  return null;
+}
+
 async function captureWindowsOwnership(entry: ManagedProcess) {
   if (process.platform !== "win32" || !entry.port) return false;
-  const listenerPid = await findWindowsListenerPid(entry.port);
-  const processes = await readWindowsProcessTable();
-  if (!listenerPid || !processes) return false;
-
-  const listener = processes.get(listenerPid);
-  if (!listener) return false;
-  if (!listenerBelongsToWindowsLaunch(listener, entry.rootProcess, entry.listenerProcess, processes)) {
+  const snapshot = await readWindowsListenerSnapshot(entry.port);
+  if (!snapshot) return false;
+  if (!listenerBelongsToWindowsLaunch(snapshot.listener, entry.rootProcess, entry.listenerProcess, snapshot.processes)) {
     return false;
   }
 
-  entry.listenerProcess = listener;
+  entry.listenerProcess = snapshot.listener;
   return true;
 }
 
@@ -236,6 +260,7 @@ async function finalizeExitedEntry(entry: ManagedProcess, exitCode: number | nul
   if (runtime.processes.get(entry.runtimeKey) !== entry) return;
   if (entry.port && await isPortListening(entry.port)) {
     if (process.platform === "win32" && await captureWindowsOwnership(entry)) return;
+    if (process.platform === "win32") return;
     runtime.processes.delete(entry.runtimeKey);
     runtime.reservedPorts.delete(entry.port);
     return;
@@ -277,8 +302,8 @@ export async function detectRunningDevServer(repository: Repository, service: Pr
       if (ownershipVerified) {
         return statusForEntry(entry, "running", `Running on localhost:${entry.port}`);
       }
-      runtime.processes.delete(key);
-      if (entry.port) runtime.reservedPorts.delete(entry.port);
+      const uncertain = unverifiedWindowsOwnershipPolicy(true);
+      return statusForEntry(entry, uncertain.state, uncertain.message);
     } else if (entry.child.exitCode === null && entry.child.signalCode === null) {
       return statusForEntry(entry, "starting", "DevHub process is starting.");
     } else {
@@ -477,7 +502,7 @@ async function startDevServerOnce(repository: Repository, service: ProjectServic
   });
 
   if (process.platform === "win32" && child.pid) {
-    const processes = await readWindowsProcessTable();
+    const processes = await readWindowsProcessTableWithRetry();
     entry.rootProcess = processes?.get(child.pid) ?? null;
   }
 
@@ -542,12 +567,12 @@ export async function stopDevServer(repository: Repository, service: ProjectServ
 
   entry.stopping = true;
   if (process.platform === "win32") {
-    const processes = await readWindowsProcessTable();
+    const portListening = entry.port ? await isPortListening(entry.port) : false;
+    const listenerSnapshot = portListening && entry.port ? await readWindowsListenerSnapshot(entry.port) : null;
+    const processes = listenerSnapshot?.processes ?? await readWindowsProcessTableWithRetry();
     const root = entry.rootProcess ? processes?.get(entry.rootProcess.pid) : null;
     const rootVerified = sameWindowsProcess(entry.rootProcess, root);
-    const portListening = entry.port ? await isPortListening(entry.port) : false;
-    const currentListenerPid = portListening && entry.port ? await findWindowsListenerPid(entry.port) : null;
-    const currentListener = currentListenerPid ? processes?.get(currentListenerPid) : null;
+    const currentListener = listenerSnapshot?.listener ?? null;
     const listenerVerified = Boolean(processes && listenerBelongsToWindowsLaunch(
       currentListener,
       entry.rootProcess,
@@ -557,21 +582,12 @@ export async function stopDevServer(repository: Repository, service: ProjectServ
 
     if (!processes || (portListening && !listenerVerified) || (!portListening && !rootVerified)) {
       entry.stopping = false;
+      const policy = unverifiedWindowsOwnershipPolicy(portListening);
       if (portListening) {
-        runtime.processes.delete(key);
-        if (entry.port) runtime.reservedPorts.delete(entry.port);
-        const uncertain: DevServerStatus = {
-          state: "port-in-use",
-          ownedByDevHub: false,
-          port: entry.port,
-          url: null,
-          startedAt: null,
-          message: "DevHub could not verify ownership of the listening process, so it was not stopped.",
-          launchMode: null,
-        };
+        const uncertain = statusForEntry(entry, policy.state, policy.message);
         return { status: "error", message: uncertain.message, output: outputExcerpt(entry.output), devServer: uncertain };
       }
-      const uncertain = statusForEntry(entry, "starting", "DevHub could not verify its process identity, so it was not stopped.");
+      const uncertain = statusForEntry(entry, policy.state, policy.message);
       return { status: "error", message: uncertain.message, output: uncertain.output, devServer: uncertain };
     }
 
