@@ -6,6 +6,51 @@ export type WindowsProcessEvidence = {
   commandLine: string | null;
 };
 
+export function sameWindowsProcess(
+  left: WindowsProcessEvidence | undefined | null,
+  right: WindowsProcessEvidence | undefined | null,
+) {
+  return Boolean(left && right && left.pid === right.pid && left.creationTime === right.creationTime);
+}
+
+export function isWindowsProcessDescendantOf(
+  pid: number,
+  ancestorPid: number,
+  processes: Map<number, WindowsProcessEvidence>,
+) {
+  const visited = new Set<number>();
+  let current = processes.get(pid);
+  while (current && !visited.has(current.pid)) {
+    if (current.pid === ancestorPid) return true;
+    visited.add(current.pid);
+    current = processes.get(current.parentPid);
+  }
+  return false;
+}
+
+export function collectWindowsProcessTree(
+  rootPid: number,
+  processes: Map<number, WindowsProcessEvidence>,
+) {
+  return [...processes.values()].filter((candidate) => (
+    isWindowsProcessDescendantOf(candidate.pid, rootPid, processes)
+  ));
+}
+
+export function listenerBelongsToWindowsLaunch(
+  listener: WindowsProcessEvidence | undefined | null,
+  rootProcess: WindowsProcessEvidence | undefined | null,
+  capturedListener: WindowsProcessEvidence | undefined | null,
+  processes: Map<number, WindowsProcessEvidence>,
+) {
+  if (!listener) return false;
+  if (sameWindowsProcess(capturedListener, listener)) return true;
+
+  const currentRoot = rootProcess ? processes.get(rootProcess.pid) : null;
+  if (!rootProcess || !sameWindowsProcess(rootProcess, currentRoot)) return false;
+  return isWindowsProcessDescendantOf(listener.pid, rootProcess.pid, processes);
+}
+
 function normalizeWindowsValue(value: string) {
   return value.replaceAll("/", "\\").toLowerCase();
 }

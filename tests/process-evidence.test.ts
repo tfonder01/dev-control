@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { classifyUnmanagedListener, listenerMatchesServicePath, type WindowsProcessEvidence } from "../lib/projects/process-evidence.ts";
+import {
+  classifyUnmanagedListener,
+  listenerBelongsToWindowsLaunch,
+  listenerMatchesServicePath,
+  type WindowsProcessEvidence,
+} from "../lib/projects/process-evidence.ts";
 
 function process(
   pid: number,
@@ -50,4 +55,63 @@ test("does not confuse sibling monorepo services or path prefixes", () => {
   assert.equal(classifyUnmanagedListener(7100, "C:\\repos\\suite\\frontend", processes), "port-in-use");
   assert.equal(classifyUnmanagedListener(7200, "C:\\repos\\suite\\frontend", processes), "external");
   assert.equal(classifyUnmanagedListener(7200, "C:\\repos\\suite\\backend", processes), "port-in-use");
+});
+
+test("recognizes a Spring Boot JVM in a DevHub-owned Gradle wrapper tree", () => {
+  const root = process(8000, 7000, "C:\\Windows\\System32\\cmd.exe", 'cmd.exe /c .\\gradlew.bat --no-daemon bootRun');
+  const processes = new Map([
+    [8000, root],
+    [8100, process(8100, 8000, "C:\\Java\\bin\\java.exe", "org.gradle.wrapper.GradleWrapperMain --no-daemon bootRun")],
+    [8200, process(8200, 8100, "C:\\Java\\bin\\java.exe", "org.gradle.launcher.daemon.bootstrap.GradleDaemon")],
+    [8300, process(8300, 8200, "C:\\Java\\bin\\java.exe", 'com.example.Application --server.port=8084')],
+  ]);
+
+  assert.equal(listenerBelongsToWindowsLaunch(processes.get(8300), root, null, processes), true);
+});
+
+test("retains exact listener ownership after Gradle wrapper parents exit", () => {
+  const captured = process(8300, 8200, "C:\\Java\\bin\\java.exe", 'com.example.Application --server.port=8084');
+  const processes = new Map([[8300, captured]]);
+  const reusedPid = {
+    ...process(8300, 8200, "C:\\Java\\bin\\java.exe", 'unrelated.Application --server.port=8084'),
+    creationTime: "reused-later",
+  };
+
+  assert.equal(listenerBelongsToWindowsLaunch(captured, null, captured, processes), true);
+  assert.equal(
+    listenerBelongsToWindowsLaunch(
+      reusedPid,
+      null,
+      captured,
+      new Map([[8300, reusedPid]]),
+    ),
+    false,
+  );
+});
+
+test("refuses listeners from a reusable Gradle daemon outside the launched tree", () => {
+  const root = process(9000, 7000, "C:\\Windows\\System32\\cmd.exe", 'cmd.exe /c .\\gradlew.bat bootRun');
+  const processes = new Map([
+    [9000, root],
+    [9100, process(9100, 9000, "C:\\Java\\bin\\java.exe", "org.gradle.wrapper.GradleWrapperMain bootRun")],
+    [9200, process(9200, 1, "C:\\Java\\bin\\java.exe", "org.gradle.launcher.daemon.bootstrap.GradleDaemon")],
+    [9300, process(9300, 9200, "C:\\Java\\bin\\java.exe", 'com.example.Application --server.port=8084')],
+  ]);
+
+  assert.equal(listenerBelongsToWindowsLaunch(processes.get(9300), root, null, processes), false);
+});
+
+test("keeps independent service listener trees isolated", () => {
+  const apiRoot = process(10000, 7000, "C:\\Windows\\System32\\cmd.exe", "gradlew.bat --no-daemon bootRun");
+  const workerRoot = process(11000, 7000, "C:\\Windows\\System32\\cmd.exe", "pnpm.cmd dev");
+  const processes = new Map([
+    [10000, apiRoot],
+    [10001, process(10001, 10000, "C:\\Java\\bin\\java.exe", "com.example.Api --server.port=8084")],
+    [11000, workerRoot],
+    [11001, process(11001, 11000, "C:\\Program Files\\nodejs\\node.exe", "next dev --port 3000")],
+  ]);
+
+  assert.equal(listenerBelongsToWindowsLaunch(processes.get(10001), apiRoot, null, processes), true);
+  assert.equal(listenerBelongsToWindowsLaunch(processes.get(11001), apiRoot, null, processes), false);
+  assert.equal(listenerBelongsToWindowsLaunch(processes.get(10001), workerRoot, null, processes), false);
 });

@@ -70,7 +70,7 @@ test("builds allowlisted Gradle wrapper launch and checks in the backend directo
   });
   assert.deepEqual(springWrapperCommand(backend, 8084, "win32"), {
     executable: ".\\gradlew.bat",
-    args: ["bootRun", "--args=--server.port=8084"],
+    args: ["--no-daemon", "bootRun", "--args=--server.port=8084"],
     cwd: "C:\\repo\\backend",
   });
   assert.deepEqual(javaCheckCommand(backend, "build", "win32"), {

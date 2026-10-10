@@ -8,7 +8,13 @@ import { promisify } from "node:util";
 import type { DevServerStatus, NodeLaunchMode, RepositoryActionResult } from "./action-types";
 import { resolveNodeRuntime } from "./node-runtime";
 import { findAvailablePort } from "./port-allocation";
-import { classifyUnmanagedListener, type WindowsProcessEvidence } from "./process-evidence";
+import {
+  classifyUnmanagedListener,
+  collectWindowsProcessTree,
+  listenerBelongsToWindowsLaunch,
+  sameWindowsProcess,
+  type WindowsProcessEvidence,
+} from "./process-evidence";
 import { classifySpringFailureOutput, redactRuntimeOutput } from "./runtime-config";
 import { resolveSpringRuntime } from "./runtime-profile";
 import { packageScriptCommand, requiresWindowsCommandShell, springLaunchArgs, springWrapperCommand } from "./service-commands";
@@ -210,25 +216,6 @@ async function readWindowsProcessTable() {
   }
 }
 
-function sameWindowsProcess(left: WindowsProcessEvidence | undefined | null, right: WindowsProcessEvidence | undefined | null) {
-  return Boolean(left && right && left.pid === right.pid && left.creationTime === right.creationTime);
-}
-
-function isDescendantOf(pid: number, ancestorPid: number, processes: Map<number, WindowsProcessEvidence>) {
-  const visited = new Set<number>();
-  let current = processes.get(pid);
-  while (current && !visited.has(current.pid)) {
-    if (current.pid === ancestorPid) return true;
-    visited.add(current.pid);
-    current = processes.get(current.parentPid);
-  }
-  return false;
-}
-
-function collectProcessTree(rootPid: number, processes: Map<number, WindowsProcessEvidence>) {
-  return [...processes.values()].filter((candidate) => isDescendantOf(candidate.pid, rootPid, processes));
-}
-
 async function captureWindowsOwnership(entry: ManagedProcess) {
   if (process.platform !== "win32" || !entry.port) return false;
   const listenerPid = await findWindowsListenerPid(entry.port);
@@ -237,11 +224,7 @@ async function captureWindowsOwnership(entry: ManagedProcess) {
 
   const listener = processes.get(listenerPid);
   if (!listener) return false;
-  if (sameWindowsProcess(entry.listenerProcess, listener)) return true;
-
-  const rootPid = entry.child.pid;
-  const root = rootPid ? processes.get(rootPid) : null;
-  if (!rootPid || !sameWindowsProcess(entry.rootProcess, root) || !isDescendantOf(listenerPid, rootPid, processes)) {
+  if (!listenerBelongsToWindowsLaunch(listener, entry.rootProcess, entry.listenerProcess, processes)) {
     return false;
   }
 
@@ -565,9 +548,12 @@ export async function stopDevServer(repository: Repository, service: ProjectServ
     const portListening = entry.port ? await isPortListening(entry.port) : false;
     const currentListenerPid = portListening && entry.port ? await findWindowsListenerPid(entry.port) : null;
     const currentListener = currentListenerPid ? processes?.get(currentListenerPid) : null;
-    const listenerVerified = sameWindowsProcess(entry.listenerProcess, currentListener)
-      || Boolean(rootVerified && currentListenerPid && entry.rootProcess && processes
-        && isDescendantOf(currentListenerPid, entry.rootProcess.pid, processes));
+    const listenerVerified = Boolean(processes && listenerBelongsToWindowsLaunch(
+      currentListener,
+      entry.rootProcess,
+      entry.listenerProcess,
+      processes,
+    ));
 
     if (!processes || (portListening && !listenerVerified) || (!portListening && !rootVerified)) {
       entry.stopping = false;
@@ -592,10 +578,10 @@ export async function stopDevServer(repository: Repository, service: ProjectServ
     if (currentListener && !entry.listenerProcess) entry.listenerProcess = currentListener;
     const ownedProcesses = new Map<number, WindowsProcessEvidence>();
     if (rootVerified && entry.rootProcess) {
-      for (const owned of collectProcessTree(entry.rootProcess.pid, processes)) ownedProcesses.set(owned.pid, owned);
+      for (const owned of collectWindowsProcessTree(entry.rootProcess.pid, processes)) ownedProcesses.set(owned.pid, owned);
     }
     if (currentListener) {
-      for (const owned of collectProcessTree(currentListener.pid, processes)) ownedProcesses.set(owned.pid, owned);
+      for (const owned of collectWindowsProcessTree(currentListener.pid, processes)) ownedProcesses.set(owned.pid, owned);
     }
 
     const killTree = async (pid: number) => {

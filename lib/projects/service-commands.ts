@@ -25,7 +25,8 @@ export function packageScriptCommand(service: ProjectService, script: ProjectScr
 }
 
 export function springLaunchArgs(service: ProjectService, port: number) {
-  if (service.capabilities.javaBuildTool === "gradle") return ["bootRun", `--args=--server.port=${port}`];
+  // Keep long-running bootRun work in a session-scoped process tree instead of a reusable global Gradle daemon.
+  if (service.capabilities.javaBuildTool === "gradle") return ["--no-daemon", "bootRun", `--args=--server.port=${port}`];
   if (service.capabilities.javaBuildTool === "maven") return ["spring-boot:run", `-Dspring-boot.run.arguments=--server.port=${port}`];
   throw new Error("No supported Spring Boot build tool was detected.");
 }
