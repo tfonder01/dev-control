@@ -17,6 +17,7 @@ import {
   isSafeRepoRelativePath,
   isSensitiveEnvironmentName,
   isNodeProfileSelector,
+  normalizeSpringProfile,
   parseDevHubConfig,
   parseComposeDependencies,
   parseEnvFile,
@@ -51,6 +52,7 @@ test("parses the documented secret-free devhub runtime schema", () => {
     "  type: spring-boot",
     "  envFile: .env.development",
     "  port: 8090",
+    "  springProfile: dev",
     "prerequisites:",
     "  dockerCompose: false",
     "  requiredEnv:",
@@ -60,10 +62,18 @@ test("parses the documented secret-free devhub runtime schema", () => {
   ].join("\n")), {
     envFile: ".env.development",
     port: 8090,
+    springProfile: "dev",
     requiredEnv: ["JWT_SECRET"],
     prerequisitePorts: [5432],
     dockerCompose: false,
   });
+});
+
+test("accepts only a single safe Spring profile name", () => {
+  assert.equal(normalizeSpringProfile("dev"), "dev");
+  assert.equal(normalizeSpringProfile("local-seed_2"), "local-seed_2");
+  assert.equal(normalizeSpringProfile("dev -Dspring.datasource.password=unsafe"), null);
+  assert.equal(normalizeSpringProfile("dev,prod"), null);
 });
 
 test("keeps configured env file paths inside the repository", () => {

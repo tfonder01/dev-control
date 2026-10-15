@@ -3,6 +3,7 @@ import path from "node:path";
 export type DevHubRuntimeConfig = {
   envFile: string | null;
   port: number | null;
+  springProfile: string | null;
   requiredEnv: string[];
   prerequisitePorts: number[];
   dockerCompose: boolean | null;
@@ -39,6 +40,7 @@ export function parseDevHubConfig(contents: string): DevHubRuntimeConfig {
   const config: DevHubRuntimeConfig = {
     envFile: null,
     port: null,
+    springProfile: null,
     requiredEnv: [],
     prerequisitePorts: [],
     dockerCompose: null,
@@ -75,11 +77,18 @@ export function parseDevHubConfig(contents: string): DevHubRuntimeConfig {
     list = "";
     if (section === "development" && key === "envFile") config.envFile = scalar(rawValue);
     if (section === "development" && key === "port") config.port = validPort(rawValue);
+    if (section === "development" && key === "springProfile") config.springProfile = normalizeSpringProfile(scalar(rawValue));
     if (section === "prerequisites" && key === "dockerCompose" && /^(true|false)$/i.test(rawValue)) {
       config.dockerCompose = rawValue.toLowerCase() === "true";
     }
   }
   return config;
+}
+
+export function normalizeSpringProfile(value: unknown) {
+  if (typeof value !== "string") return null;
+  const profile = value.trim();
+  return /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(profile) ? profile : null;
 }
 
 export function isSafeRepoRelativePath(value: string) {

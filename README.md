@@ -60,7 +60,7 @@ For each mode, DevHub inspects Next.js environment files in the service director
 
 Spring Boot ports are read conservatively from each service's application configuration, falling back to port 8080. DevHub uses the same bounded alternate-port selection and passes a fixed runtime port override. Docker containers are never started during scanning or page rendering, and externally running dependencies are never claimed.
 
-Before a Spring Boot launch, DevHub resolves a server-only local runtime environment in this order: the DevHub process environment, repository-root `.env`/`.env.local`, service-local `.env`/`.env.local`, then an optional `development.envFile` named by the nearest service or repository `devhub.yml`/`devhub.yaml`. The configured file must resolve inside the trusted repository. Values are injected only into the Spring child process; the browser receives configured/not-configured status and never receives secret values. Recognizable required placeholders such as `DB_PASSWORD` and local PostgreSQL datasource ports are checked before the service starts.
+Before a Spring Boot launch, DevHub resolves a server-only local runtime environment in this order: the DevHub process environment, repository-root `.env`/`.env.local`, service-local `.env`/`.env.local`, then an optional `development.envFile` named by the nearest service or repository `devhub.yml`/`devhub.yaml`. The configured file must resolve inside the trusted repository. Values are injected only into the Spring child process; the browser receives configured/not-configured status and never receives secret values. Recognizable required placeholders such as `DB_PASSWORD` and local PostgreSQL datasource ports are checked before the service starts. A project may independently set an optional `development.springProfile`; DevHub passes it as build-tool launch metadata and does not add it to the child environment. A DevHub-local `projects.<repository-id>.runtime.springProfile` entry in `.devhub/projects.json` overrides the repository setting without modifying the application checkout.
 
 For service-specific secrets, create an ignored env file beside the Spring service (for example `backend/.env.local`) or point `development.envFile` to another ignored repository-local file. DevHub does not create, edit, display, or persist those secret values.
 
@@ -71,6 +71,7 @@ development:
   type: spring-boot
   envFile: .env
   port: 8080
+  springProfile: dev
 prerequisites:
   dockerCompose: false
   requiredEnv:

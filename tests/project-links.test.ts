@@ -130,6 +130,23 @@ test("adds workspace links to a legacy version 1 file without discarding project
   }
 });
 
+test("preserves DevHub-owned runtime metadata when project links are saved", async () => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), "devhub-project-runtime-"));
+  const metadataPath = path.join(directory, "projects.json");
+  try {
+    await writeFile(metadataPath, JSON.stringify({
+      version: 1,
+      projects: { AAAAAAAAAAAAAAAA: { links: {}, runtime: { springProfile: "dev" } } },
+    }), "utf8");
+    const store = createProjectLinksStore(metadataPath);
+    assert.deepEqual(await store.getRuntime("AAAAAAAAAAAAAAAA"), { springProfile: "dev" });
+    await store.save("AAAAAAAAAAAAAAAA", { links: { production: "https://example.com/" }, customLinks: [] });
+    assert.deepEqual(await store.getRuntime("AAAAAAAAAAAAAAAA"), { springProfile: "dev" });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test("manual project links override detection and removal falls back to the detected URL", () => {
   const detected = { github: "https://github.com/owner/example", production: "https://detected.example/" } as const;
   const configured = { links: { production: "https://configured.example/" }, customLinks: [] };

@@ -4,12 +4,19 @@ import path from "node:path";
 
 import { EMPTY_PROJECT_LINKS, EMPTY_WORKSPACE_LINKS, WORKSPACE_LINK_DEFINITIONS, type ProjectLinksConfig, type WorkspaceLinksConfig } from "./project-links-types.ts";
 import { isKnownProjectLinkKey, validateCustomLinkLabel, validateProjectUrl } from "./project-links-validation.ts";
+import { normalizeSpringProfile } from "./runtime-config.ts";
+
+type ProjectMetadataEntry = {
+  links?: Partial<Record<string, string>>;
+  customLinks?: Array<{ label: string; url: string }>;
+  runtime?: { springProfile?: string };
+};
 
 type ProjectMetadataFile = {
   version: 1;
   workspaceLinks?: Partial<Record<string, string>>;
   workspaceCustomLinks?: Array<{ label: string; url: string }>;
-  projects: Record<string, { links: Partial<Record<string, string>>; customLinks?: Array<{ label: string; url: string }> }>;
+  projects: Record<string, ProjectMetadataEntry>;
 };
 
 const PROJECT_ID_PATTERN = /^[A-Za-z0-9_-]{16}$/;
@@ -64,6 +71,11 @@ function normalizeWorkspaceConfig(value: unknown): WorkspaceLinksConfig {
     }
   }
   return { links, customLinks };
+}
+
+function normalizeRuntimeConfig(value: unknown) {
+  if (!value || typeof value !== "object") return { springProfile: null };
+  return { springProfile: normalizeSpringProfile((value as { springProfile?: unknown }).springProfile) };
 }
 
 export function createProjectLinksStore(metadataPath: string) {
@@ -127,12 +139,17 @@ export function createProjectLinksStore(metadataPath: string) {
       const metadata = await readMetadata();
       return normalizeConfig(metadata.projects[repositoryId]);
     },
+    async getRuntime(repositoryId: string) {
+      if (!PROJECT_ID_PATTERN.test(repositoryId)) return { springProfile: null };
+      const metadata = await readMetadata();
+      return normalizeRuntimeConfig(metadata.projects[repositoryId]?.runtime);
+    },
     async save(repositoryId: string, config: ProjectLinksConfig) {
       if (!PROJECT_ID_PATTERN.test(repositoryId)) throw new Error("Invalid repository identity.");
       const normalized = normalizeConfig(config);
       const operation = writeQueue.then(async () => {
         const metadata = await readMetadata();
-        metadata.projects[repositoryId] = normalized;
+        metadata.projects[repositoryId] = { ...metadata.projects[repositoryId], ...normalized };
         await writeMetadata(metadata);
         return normalized;
       });

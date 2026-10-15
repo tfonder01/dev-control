@@ -21,6 +21,10 @@ export async function saveProjectLinks(repositoryId: string, config: ProjectLink
   return projectLinksStore.save(repositoryId, config);
 }
 
+export async function getProjectRuntimeConfig(repositoryId: string) {
+  return projectLinksStore.getRuntime(repositoryId);
+}
+
 export async function getWorkspaceLinks() {
   return projectLinksStore.getWorkspace();
 }

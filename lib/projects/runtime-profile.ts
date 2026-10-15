@@ -5,6 +5,7 @@ import net from "node:net";
 import path from "node:path";
 
 import type { SpringRuntimeStatus } from "./action-types";
+import { getProjectRuntimeConfig } from "./project-links";
 import {
   databaseEndpoint,
   extractRequiredEnvironment,
@@ -28,6 +29,7 @@ const COMPOSE_FILES = ["compose.yml", "compose.yaml", "docker-compose.yml", "doc
 export type ResolvedSpringRuntime = {
   environment: NodeJS.ProcessEnv;
   preferredPort: number | null;
+  springProfile: string | null;
   redactions: string[];
   dependencies: ResolvedComposeDependencies | null;
   status: SpringRuntimeStatus;
@@ -109,6 +111,8 @@ export async function resolveSpringRuntime(repository: Repository, service: Proj
     return await exists(file) ? file : null;
   })))).find(Boolean) ?? null;
   const runtimeConfig = configPath ? parseDevHubConfig(await readFile(/* turbopackIgnore: true */ configPath, "utf8")) : parseDevHubConfig("");
+  const projectRuntimeConfig = await getProjectRuntimeConfig(repository.id);
+  const springProfile = projectRuntimeConfig.springProfile ?? runtimeConfig.springProfile;
   const environment: NodeJS.ProcessEnv = { ...process.env };
   const loadedFiles: string[] = [];
   let configuredEnvironmentError: string | null = null;
@@ -139,7 +143,8 @@ export async function resolveSpringRuntime(repository: Repository, service: Proj
     const contents = await readOptional(path.join(/* turbopackIgnore: true */ resources, name));
     if (contents !== null) springFiles[name] = contents;
   }
-  const activeProfiles = (environment.SPRING_PROFILES_ACTIVE
+  const activeProfiles = (springProfile
+    ?? environment.SPRING_PROFILES_ACTIVE
     ?? configValue(springFiles, "spring.profiles.active", environment)
     ?? "").split(",").map((item) => item.trim()).filter((item) => /^[A-Za-z0-9_-]+$/.test(item));
   for (const profile of activeProfiles) {
@@ -217,6 +222,14 @@ export async function resolveSpringRuntime(repository: Repository, service: Proj
     detail: environmentSource ?? "DevHub process environment",
     state: configuredEnvironmentError ? "blocked" : environmentSource ? "ready" : "warning",
   });
+  if (springProfile) {
+    prerequisites.push({
+      kind: "environment",
+      label: "Spring profile",
+      detail: springProfile,
+      state: "ready",
+    });
+  }
   for (const name of requiredNames.filter((item) => isSensitiveEnvironmentName(item))) {
     prerequisites.push({
       kind: "required-config",
@@ -288,6 +301,7 @@ export async function resolveSpringRuntime(repository: Repository, service: Proj
   return {
     environment,
     preferredPort: configuredPort !== null && Number.isSafeInteger(configuredPort) && configuredPort >= 1 && configuredPort <= 65_535 ? configuredPort : null,
+    springProfile,
     redactions,
     dependencies,
     status: {

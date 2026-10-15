@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { findAvailablePort } from "../lib/projects/port-allocation.ts";
-import { javaCheckCommand, packageScriptCommand, requiresWindowsCommandShell, springWrapperCommand } from "../lib/projects/service-commands.ts";
+import { javaCheckCommand, packageScriptCommand, requiresWindowsCommandShell, springLaunchArgs, springWrapperCommand } from "../lib/projects/service-commands.ts";
 import type { ProjectService } from "../lib/workspace/types.ts";
 
 function service(overrides: Partial<ProjectService> & Pick<ProjectService, "id" | "name" | "path" | "relativePath" | "kind">): ProjectService {
@@ -73,6 +73,11 @@ test("builds allowlisted Gradle wrapper launch and checks in the backend directo
     args: ["--no-daemon", "bootRun", "--args=--server.port=8084"],
     cwd: "C:\\repo\\backend",
   });
+  assert.deepEqual(springWrapperCommand(backend, 8084, "win32", "local"), {
+    executable: ".\\gradlew.bat",
+    args: ["--no-daemon", "bootRun", "--args=--server.port=8084 --spring.profiles.active=local"],
+    cwd: "C:\\repo\\backend",
+  });
   assert.deepEqual(javaCheckCommand(backend, "build", "win32"), {
     executable: ".\\gradlew.bat",
     args: ["build"],
@@ -82,6 +87,39 @@ test("builds allowlisted Gradle wrapper launch and checks in the backend directo
   assert.equal(requiresWindowsCommandShell(".\\gradlew.bat", "win32"), true);
   assert.equal(requiresWindowsCommandShell(".\\mvnw.cmd", "win32"), true);
   assert.equal(requiresWindowsCommandShell("./gradlew", "linux"), false);
+});
+
+test("adds an explicitly configured Maven Spring profile without changing the default launch", () => {
+  const backend = service({
+    id: "MMMMMMMMMMMMMMMM",
+    name: "backend",
+    path: "C:\\repo\\backend",
+    relativePath: ".",
+    kind: "spring-boot",
+    capabilities: {
+      packageManager: null,
+      packageScripts: [],
+      hasMavenWrapper: true,
+      hasGradleWrapper: false,
+      hasSpringBoot: true,
+      javaBuildTool: "maven",
+      devPortHint: 8080,
+      devPortSource: "framework-default",
+    },
+  });
+  assert.deepEqual(springLaunchArgs(backend, 8080), [
+    "spring-boot:run",
+    "-Dspring-boot.run.arguments=--server.port=8080",
+  ]);
+  assert.deepEqual(springWrapperCommand(backend, 8080, "win32", "dev"), {
+    executable: ".\\mvnw.cmd",
+    args: [
+      "spring-boot:run",
+      "-Dspring-boot.run.profiles=dev",
+      "-Dspring-boot.run.arguments=--server.port=8080",
+    ],
+    cwd: "C:\\repo\\backend",
+  });
 });
 
 test("keeps bounded automatic port conflict resolution shared across services", async () => {

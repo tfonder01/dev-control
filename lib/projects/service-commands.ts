@@ -24,15 +24,22 @@ export function packageScriptCommand(service: ProjectService, script: ProjectScr
   };
 }
 
-export function springLaunchArgs(service: ProjectService, port: number) {
+export function springLaunchArgs(service: ProjectService, port: number, springProfile: string | null = null) {
   // Keep long-running bootRun work in a session-scoped process tree instead of a reusable global Gradle daemon.
-  if (service.capabilities.javaBuildTool === "gradle") return ["--no-daemon", "bootRun", `--args=--server.port=${port}`];
-  if (service.capabilities.javaBuildTool === "maven") return ["spring-boot:run", `-Dspring-boot.run.arguments=--server.port=${port}`];
+  if (service.capabilities.javaBuildTool === "gradle") {
+    const applicationArgs = [`--server.port=${port}`, ...(springProfile ? [`--spring.profiles.active=${springProfile}`] : [])].join(" ");
+    return ["--no-daemon", "bootRun", `--args=${applicationArgs}`];
+  }
+  if (service.capabilities.javaBuildTool === "maven") return [
+    "spring-boot:run",
+    ...(springProfile ? [`-Dspring-boot.run.profiles=${springProfile}`] : []),
+    `-Dspring-boot.run.arguments=--server.port=${port}`,
+  ];
   throw new Error("No supported Spring Boot build tool was detected.");
 }
 
-export function springWrapperCommand(service: ProjectService, port: number, platform: NodeJS.Platform = process.platform): AllowlistedCommand | null {
-  const args = springLaunchArgs(service, port);
+export function springWrapperCommand(service: ProjectService, port: number, platform: NodeJS.Platform = process.platform, springProfile: string | null = null): AllowlistedCommand | null {
+  const args = springLaunchArgs(service, port, springProfile);
   if (service.capabilities.javaBuildTool === "gradle" && service.capabilities.hasGradleWrapper) {
     return { executable: windows(platform) ? ".\\gradlew.bat" : "./gradlew", args, cwd: service.path };
   }

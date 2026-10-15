@@ -100,8 +100,8 @@ function spawnPackageScript(service: ProjectService, script: "dev" | "build" | "
   });
 }
 
-async function spawnSpringBoot(service: ProjectService, port: number, resolvedEnvironment: NodeJS.ProcessEnv): Promise<ChildProcessByStdio<null, Readable, Readable>> {
-  const wrapper = springWrapperCommand(service, port);
+async function spawnSpringBoot(service: ProjectService, port: number, resolvedEnvironment: NodeJS.ProcessEnv, springProfile: string | null): Promise<ChildProcessByStdio<null, Readable, Readable>> {
+  const wrapper = springWrapperCommand(service, port, process.platform, springProfile);
   let executable = wrapper?.executable;
   let args = wrapper?.args;
   const buildTool = service.capabilities.javaBuildTool;
@@ -115,10 +115,10 @@ async function spawnSpringBoot(service: ProjectService, port: number, resolvedEn
       const label = buildTool === "gradle" ? "Gradle" : "Maven";
       throw new Error(`${label} was not found and this service has no ${label} wrapper.`);
     }
-    args = springLaunchArgs(service, port);
+    args = springLaunchArgs(service, port, springProfile);
   } else if (!executable) {
     executable = buildTool === "gradle" ? "gradle" : "mvn";
-    args = springLaunchArgs(service, port);
+    args = springLaunchArgs(service, port, springProfile);
   }
   if (!executable || !args) throw new Error("The Spring Boot launch command could not be resolved.");
   const inheritedEnvironment = Object.fromEntries(
@@ -460,7 +460,7 @@ async function startDevServerOnce(repository: Repository, service: ProjectServic
   let child: ChildProcessByStdio<null, Readable, Readable>;
   try {
     child = runtimeKind === "spring-boot"
-      ? await spawnSpringBoot(service, port, springRuntime?.environment ?? process.env)
+      ? await spawnSpringBoot(service, port, springRuntime?.environment ?? process.env, springRuntime?.springProfile ?? null)
       : spawnPackageScript(service, launchMode === "preview" ? "start" : "dev", {
           ...nodeRuntime!.environment,
           PORT: String(port),
