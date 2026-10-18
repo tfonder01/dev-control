@@ -1,0 +1,119 @@
+{
+  "version": 1,
+  "workspaces": [
+    {
+      "version": 1,
+      "id": "sentrywealth",
+      "name": "SentryWealth",
+      "repositories": [
+        {
+          "id": "application",
+          "repositoryId": "mbl4t3RoIqL2ePxO"
+        }
+      ],
+      "externalEnvironmentFiles": [],
+      "profiles": [
+        {
+          "id": "sandbox",
+          "name": "Sandbox",
+          "risk": "local",
+          "exclusiveGroup": "sentrywealth-environment",
+          "loopbackOnly": true,
+          "openUrl": "http://127.0.0.1:3002",
+          "services": [
+            {
+              "id": "database",
+              "name": "PostgreSQL",
+              "adapter": "docker-compose",
+              "repository": "application",
+              "composeFile": "infrastructure/docker-compose.yml",
+              "projectName": "devhub-sbzyspr8ueguv6vd",
+              "services": ["postgres"],
+              "dependsOn": [],
+              "environment": {},
+              "environmentFiles": [
+                {
+                  "source": "repository",
+                  "repository": "application",
+                  "path": "infrastructure/.env"
+                }
+              ],
+              "host": "127.0.0.1",
+              "port": 5433,
+              "healthChecks": [
+                {
+                  "type": "docker-health",
+                  "service": "postgres",
+                  "timeoutMs": 60000
+                }
+              ]
+            },
+            {
+              "id": "backend",
+              "name": "Spring Boot API",
+              "adapter": "spring-boot",
+              "repository": "application",
+              "serviceId": "5uwmxJzD4rY1MF2Z",
+              "springProfile": null,
+              "dependsOn": ["database"],
+              "environment": {
+                "SPRING_PROFILES_ACTIVE": "",
+                "PLAID_ENV": "sandbox",
+                "PLAID_PRODUCTION_TRIAL_ACKNOWLEDGED": "false"
+              },
+              "environmentFiles": [
+                {
+                  "source": "repository",
+                  "repository": "application",
+                  "path": "backend/.env.local"
+                }
+              ],
+              "host": "127.0.0.1",
+              "port": 8080,
+              "healthChecks": [
+                {
+                  "type": "http",
+                  "url": "http://127.0.0.1:8080/actuator/health",
+                  "expectedStatuses": [200],
+                  "timeoutMs": 90000,
+                  "allowInvalidCertificate": false
+                }
+              ]
+            },
+            {
+              "id": "frontend",
+              "name": "Next.js Frontend",
+              "adapter": "node",
+              "repository": "application",
+              "serviceId": "5Zg8jxlWd8AqEPgq",
+              "launchMode": "preview",
+              "dependsOn": ["backend"],
+              "environment": {
+                "SENTRYWEALTH_API_URL": "http://127.0.0.1:8080",
+                "NEXT_PUBLIC_SENTRYWEALTH_ENVIRONMENT": "sandbox"
+              },
+              "environmentFiles": [
+                {
+                  "source": "repository",
+                  "repository": "application",
+                  "path": "frontend/.env.local"
+                }
+              ],
+              "host": "127.0.0.1",
+              "port": 3002,
+              "healthChecks": [
+                {
+                  "type": "http",
+                  "url": "http://127.0.0.1:3002",
+                  "expectedStatuses": [200, 302, 307, 308],
+                  "timeoutMs": 90000,
+                  "allowInvalidCertificate": false
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

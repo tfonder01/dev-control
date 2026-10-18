@@ -77,3 +77,17 @@ export function createBoundedRuntimeEnvironment(
 
   return environment as NodeJS.ProcessEnv;
 }
+
+export function createNodeProcessEnvironment(
+  runtimeEnvironment: NodeJS.ProcessEnv,
+  profileEnvironment: NodeJS.ProcessEnv = {} as NodeJS.ProcessEnv,
+  binding: { host?: string; port?: number } = {},
+): NodeJS.ProcessEnv {
+  return {
+    ...runtimeEnvironment,
+    ...profileEnvironment,
+    NODE_ENV: runtimeEnvironment.NODE_ENV,
+    ...(binding.port === undefined ? {} : { PORT: String(binding.port) }),
+    ...(binding.host === undefined ? {} : { HOSTNAME: binding.host }),
+  } as NodeJS.ProcessEnv;
+}

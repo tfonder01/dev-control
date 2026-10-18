@@ -64,6 +64,25 @@ Before a Spring Boot launch, DevHub resolves a server-only local runtime environ
 
 For service-specific secrets, create an ignored env file beside the Spring service (for example `backend/.env.local`) or point `development.envFile` to another ignored repository-local file. DevHub does not create, edit, display, or persist those secret values.
 
+## Environment profile foundation
+
+DevHub includes a server-only orchestration foundation for versioned, multi-repository workspace profiles. Code-reviewed profiles are loaded from `config/environment-profiles.json` and may be extended by the ignored owner-controlled `.devhub/environments.json` file. Duplicate workspace IDs fail closed. Definitions are never accepted from browser requests. The strict version 1 schema supports:
+
+- stable workspace, profile, repository, and service references;
+- fixed loopback ports, dependency graphs, deterministic start/stop ordering, and mutually exclusive profiles;
+- Node/Next.js, Spring Boot, explicit Docker Compose project/service sets, and trusted local-process adapters;
+- TCP, HTTP, process, and Docker health checks;
+- profile-scoped in-memory ownership, external-service observation, graceful-first shutdown, and operation-scoped rollback; and
+- repository-local environment files or external files resolved through owner-controlled path environment variables.
+
+Configuration stores references and non-secret topology only. Environment-file contents are loaded server-side at launch time, passed only to the configured child runtime, and redacted from captured output. Trusted process commands, executable paths, working directories, and arguments originate only from this local configuration. Secret-bearing command arguments are rejected.
+
+The project page exposes a compact application/profile selector with inspection, start, stop, restart, and Open App controls. Node services also expose Development and Preview selection; Preview reuses the individual-service production build/start path. Server actions accept only opaque repository/workspace/profile identifiers, allowlisted node-service mode selections, a fixed action enum, and an explicit real-data confirmation flag. Every request re-resolves the trusted profile against the current workspace snapshot. Lifecycle operations are serialized per profile, and the browser receives only sanitized status DTOs. Existing per-service controls remain available independently. Changing a running frontend's mode requires the controlled Restart Environment action; a second listener is never launched on the fixed port.
+
+The bundled `SentryWealth` / `Sandbox` profile targets the verified loopback topology: the established `devhub-sbzyspr8ueguv6vd` Compose project and `postgres` service on `127.0.0.1:5433`, Spring Boot on `127.0.0.1:8080`, then the Next.js frontend on `127.0.0.1:3002`. Preview is the configured default, while the Environment Profiles control can select Development before start or request a controlled restart into another mode. Both modes explicitly bind the configured host and port; DevHub's own development port remains independent at 3000. The profile references repository-owned ignored environment files without copying their contents. Fixed non-secret overrides force Plaid Sandbox, clear inherited Spring profile selection, retain the Production Trial acknowledgement gate, select the Sandbox frontend marker, and supply the backend BFF endpoint during both Preview build and start. The profile never names or reads the Production Trial private environment file.
+
+Real-data profiles require a checked confirmation for every start, stop, or restart request, including server-side enforcement. Healthy matching services started outside DevHub are shown as External and are never adopted or stopped. Ownership remains intentionally in memory; after a DevHub server restart, previously launched services are observed as external until they are stopped by their owner.
+
 An optional secret-free runtime profile can make inference explicit:
 
 ```yaml

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import path from "node:path";
 
 export type DevHubRuntimeConfig = {
@@ -278,6 +279,10 @@ export function redactRuntimeOutput(value: string, redactions: string[]) {
   return redacted;
 }
 
+export function summarizeRuntimeOutput(value: string, redactions: string[], maxLength = 220) {
+  return redactRuntimeOutput(value, redactions).replace(/\s+/g, " ").trim().slice(0, maxLength);
+}
+
 export function classifySpringFailureOutput(output: string) {
   if (/JWT_SECRET must be at least 32 bytes/i.test(output)) return "JWT_SECRET is missing or does not meet the backend's local configuration requirement.";
   if (/(connection refused|could not connect)[\s\S]*?(postgres|localhost|127\.0\.0\.1)|org\.postgresql[\s\S]*connection[\s\S]*refused/i.test(output)) {
@@ -291,14 +296,116 @@ export function classifySpringFailureOutput(output: string) {
 export function buildComposeCommandArgs(
   repositoryId: string,
   composePath: string,
-  operation: "start" | "stop",
+  operation: "start" | "stop" | "status",
   services: string[],
 ) {
   if (!/^[A-Za-z0-9_-]{16}$/.test(repositoryId) || services.length === 0 || services.some((service) => !/^[A-Za-z0-9_.-]+$/.test(service))) {
     throw new Error("Invalid trusted Compose operation metadata.");
   }
-  const base = ["compose", "--project-name", `devhub-${repositoryId.toLowerCase()}`, "--file", composePath];
-  return operation === "start"
-    ? [...base, "up", "--detach", ...services]
-    : [...base, "stop", ...services];
+  const base = ["compose", "--project-name", devHubComposeProjectName(repositoryId), "--file", composePath];
+  if (operation === "start") return [...base, "up", "--detach", ...services];
+  if (operation === "stop") return [...base, "stop", ...services];
+  return [...base, "ps", "--all", "--format", "json", ...services];
+}
+
+export function devHubComposeProjectName(repositoryId: string) {
+  if (!/^[A-Za-z0-9_-]{16}$/.test(repositoryId)) throw new Error("Invalid trusted Compose project metadata.");
+  return `devhub-${repositoryId.toLowerCase()}`;
+}
+
+export function devHubDependencyComposeProjectId(repositoryId: string, serviceId: string, infrastructureId: string | null) {
+  for (const value of [repositoryId, serviceId, ...(infrastructureId ? [infrastructureId] : [])]) {
+    if (!/^[A-Za-z0-9_-]{16}$/.test(value)) throw new Error("Invalid trusted dependency project metadata.");
+  }
+  return createHash("sha256").update(`${repositoryId}:${serviceId}:${infrastructureId ?? "colocated"}`).digest("base64url").slice(0, 16);
+}
+
+export function devHubComposeVolumeName(repositoryId: string, volume: string) {
+  if (!/^[A-Za-z0-9_.-]+$/.test(volume)) throw new Error("Invalid trusted Compose volume metadata.");
+  return `${devHubComposeProjectName(repositoryId)}_${volume}`;
+}
+
+export function buildExplicitComposeCommandArgs(
+  projectName: string,
+  composePath: string,
+  operation: "start" | "stop" | "status",
+  services: string[],
+) {
+  if (!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(projectName)
+    || !path.isAbsolute(composePath)
+    || services.length === 0
+    || services.some((service) => !/^[A-Za-z0-9_.-]+$/.test(service))) {
+    throw new Error("Invalid trusted Compose profile metadata.");
+  }
+  const base = ["compose", "--project-name", projectName, "--file", composePath];
+  if (operation === "start") return [...base, "up", "--detach", ...services];
+  if (operation === "stop") return [...base, "stop", "--timeout", "10", ...services];
+  return [...base, "ps", "--format", "json", ...services];
+}
+
+export type ComposePsRecord = {
+  Service?: string;
+  Project?: string;
+  Labels?: string;
+  State?: string;
+  Health?: string;
+  Publishers?: Array<{ URL?: string; PublishedPort?: number; TargetPort?: number; Protocol?: string }>;
+};
+
+export function composeRowsUseConfigFile(rows: ComposePsRecord[], composePath: string) {
+  const expected = path.normalize(composePath).toLowerCase();
+  return rows.length > 0 && rows.every((row) => {
+    const label = (row.Labels ?? "").split(",").find((item) => item.startsWith("com.docker.compose.project.config_files="));
+    if (!label) return false;
+    const configured = label.slice("com.docker.compose.project.config_files=".length).split(";").map((item) => path.normalize(item).toLowerCase());
+    return configured.includes(expected);
+  });
+}
+
+export function parseComposePsRecords(output: string): ComposePsRecord[] {
+  const trimmed = output.trim();
+  if (!trimmed) return [];
+  try {
+    const parsed = JSON.parse(trimmed) as ComposePsRecord | ComposePsRecord[];
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    const rows: ComposePsRecord[] = [];
+    for (const line of trimmed.split(/\r?\n/)) {
+      try {
+        rows.push(JSON.parse(line) as ComposePsRecord);
+      } catch {
+        return [];
+      }
+    }
+    return rows;
+  }
+}
+
+export function classifyComposePsIdentity(output: string, projectName: string, services: string[], expectedHost: string, expectedPort: number) {
+  const rows = parseComposePsRecords(output).filter((row) => row.Service && services.includes(row.Service));
+  if (rows.length === 0) return { state: "stopped" as const, reason: null, rows };
+  if (!services.every((service) => rows.some((row) => row.Service === service))) {
+    return { state: "mismatch" as const, reason: "missing-service" as const, rows };
+  }
+  if (rows.some((row) => row.Project && row.Project !== projectName)) {
+    return { state: "mismatch" as const, reason: "project" as const, rows };
+  }
+  if (rows.every((row) => /^(exited|created|dead)$/i.test(row.State ?? ""))) {
+    return { state: "stopped" as const, reason: null, rows };
+  }
+  const publishers = rows.flatMap((row) => row.Publishers ?? []);
+  const normalizedHost = expectedHost === "localhost" ? "127.0.0.1" : expectedHost.replace(/^\[|\]$/g, "");
+  const expectedPublisher = publishers.some((publisher) => {
+    const url = (publisher.URL ?? "").replace(/^\[|\]$/g, "");
+    return publisher.PublishedPort === expectedPort && (url === normalizedHost || normalizedHost === "127.0.0.1" && url.startsWith("127."));
+  });
+  const nonLoopbackPublisher = publishers.some((publisher) => {
+    const url = (publisher.URL ?? "").replace(/^\[|\]$/g, "");
+    return url.length > 0 && url !== "::1" && url !== "localhost" && !url.startsWith("127.");
+  });
+  if (nonLoopbackPublisher) return { state: "mismatch" as const, reason: "non-loopback-publisher" as const, rows };
+  if (!expectedPublisher) return { state: "mismatch" as const, reason: "missing-publisher" as const, rows };
+  const running = rows.every((row) => /running/i.test(row.State ?? ""));
+  const healthy = running && rows.every((row) => !row.Health || /^healthy$/i.test(row.Health.trim()));
+  return { state: healthy ? "healthy" as const : running ? "running" as const : "degraded" as const, reason: null, rows };
 }

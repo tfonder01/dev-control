@@ -104,7 +104,12 @@ function configValue(files: Record<string, string>, key: string, environment: No
   return undefined;
 }
 
-export async function resolveSpringRuntime(repository: Repository, service: ProjectService): Promise<ResolvedSpringRuntime> {
+export async function resolveSpringRuntime(
+  repository: Repository,
+  service: ProjectService,
+  environmentOverrides: NodeJS.ProcessEnv = {} as NodeJS.ProcessEnv,
+  springProfileOverride?: string | null,
+): Promise<ResolvedSpringRuntime> {
   const configDirectories = service.path === repository.path ? [service.path] : [service.path, repository.path];
   const configPath = (await Promise.all(configDirectories.flatMap((directory) => ["devhub.yaml", "devhub.yml"].map(async (name) => {
     const file = path.join(/* turbopackIgnore: true */ directory, name);
@@ -112,7 +117,9 @@ export async function resolveSpringRuntime(repository: Repository, service: Proj
   })))).find(Boolean) ?? null;
   const runtimeConfig = configPath ? parseDevHubConfig(await readFile(/* turbopackIgnore: true */ configPath, "utf8")) : parseDevHubConfig("");
   const projectRuntimeConfig = await getProjectRuntimeConfig(repository.id);
-  const springProfile = projectRuntimeConfig.springProfile ?? runtimeConfig.springProfile;
+  const springProfile = springProfileOverride === undefined
+    ? projectRuntimeConfig.springProfile ?? runtimeConfig.springProfile
+    : springProfileOverride;
   const environment: NodeJS.ProcessEnv = { ...process.env };
   const loadedFiles: string[] = [];
   let configuredEnvironmentError: string | null = null;
@@ -136,6 +143,7 @@ export async function resolveSpringRuntime(repository: Repository, service: Proj
       loadedFiles.push(configuredRelativePath);
     } else configuredEnvironmentError = `Configured environment file ${runtimeConfig.envFile} is missing or outside the repository.`;
   }
+  Object.assign(environment, environmentOverrides);
 
   const resources = path.join(/* turbopackIgnore: true */ service.path, "src", "main", "resources");
   const springFiles: Record<string, string> = {};

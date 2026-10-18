@@ -7,12 +7,17 @@ import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 
-import { createBoundedRuntimeEnvironment } from "../lib/projects/runtime-environment.ts";
+import { createBoundedRuntimeEnvironment, createNodeProcessEnvironment } from "../lib/projects/runtime-environment.ts";
 
 import {
   buildComposeCommandArgs,
+  classifyComposePsIdentity,
+  composeRowsUseConfigFile,
   classifySpringFailureOutput,
   databaseEndpoint,
+  devHubComposeProjectName,
+  devHubComposeVolumeName,
+  devHubDependencyComposeProjectId,
   extractRequiredEnvironment,
   isSafeRepoRelativePath,
   isSensitiveEnvironmentName,
@@ -151,6 +156,26 @@ test("launched Next.js runtimes prefer repository env while retaining DevHub's p
   assert.deepEqual(JSON.parse(stdout), { provider: "google", port: "4317" });
 });
 
+test("Preview build and start environments retain profile API settings and fixed mode bindings", () => {
+  const runtime = { NODE_ENV: "production", PATH: "C:\\tools" } as NodeJS.ProcessEnv;
+  const profile = {
+    NODE_ENV: "development",
+    SENTRYWEALTH_API_URL: "http://127.0.0.1:8080",
+    NEXT_PUBLIC_SENTRYWEALTH_ENVIRONMENT: "sandbox",
+  } as NodeJS.ProcessEnv;
+  const build = createNodeProcessEnvironment(runtime, profile);
+  const start = createNodeProcessEnvironment(runtime, profile, { host: "127.0.0.1", port: 3002 });
+
+  for (const environment of [build, start]) {
+    assert.equal(environment.NODE_ENV, "production");
+    assert.equal(environment.SENTRYWEALTH_API_URL, "http://127.0.0.1:8080");
+    assert.equal(environment.NEXT_PUBLIC_SENTRYWEALTH_ENVIRONMENT, "sandbox");
+  }
+  assert.equal(build.PORT, undefined);
+  assert.equal(start.PORT, "3002");
+  assert.equal(start.HOSTNAME, "127.0.0.1");
+});
+
 test("detects a PostgreSQL Compose service and its host port without reading secrets", () => {
   const compose = [
     "services:",
@@ -219,6 +244,34 @@ test("builds only targeted, repository-scoped Compose lifecycle commands", () =>
   assert.deepEqual(stop.slice(-2), ["stop", "postgres"]);
   assert.equal(stop.includes("down"), false);
   assert.equal(stop.includes("--volumes"), false);
+  assert.deepEqual(buildComposeCommandArgs("RB24Abqiy8Q5H8dC", "C:\\repo\\compose.yml", "status", ["postgres"]), [
+    "compose", "--project-name", "devhub-rb24abqiy8q5h8dc", "--file", "C:\\repo\\compose.yml", "ps", "--all", "--format", "json", "postgres",
+  ]);
   assert.throws(() => buildComposeCommandArgs("RB24Abqiy8Q5H8dC", "C:\\repo\\compose.yml", "start", ["postgres;backend"]));
   assert.throws(() => buildComposeCommandArgs("RB24Abqiy8Q5H8dC", "C:\\repo\\compose.yml", "start", []));
+});
+
+test("legacy dependency identity preserves the original Compose project and named-volume namespace", () => {
+  const repositoryId = "mbl4t3RoIqL2ePxO";
+  const projectId = devHubDependencyComposeProjectId(repositoryId, "5uwmxJzD4rY1MF2Z", "0ggyQhHWMYKxPSqW");
+  const project = devHubComposeProjectName(projectId);
+  assert.equal(project, "devhub-sbzyspr8ueguv6vd");
+  assert.equal(devHubComposeVolumeName(projectId, "postgres_data"), "devhub-sbzyspr8ueguv6vd_postgres_data");
+
+  const matching = JSON.stringify([{
+    Service: "postgres",
+    Project: project,
+    State: "running",
+    Health: "healthy",
+    Labels: "com.docker.compose.project=devhub-sbzyspr8ueguv6vd,com.docker.compose.project.config_files=C:\\repo\\infrastructure\\docker-compose.yml",
+    Publishers: [{ URL: "127.0.0.1", PublishedPort: 5433, TargetPort: 5432, Protocol: "tcp" }],
+  }]);
+  assert.equal(classifyComposePsIdentity(matching, project, ["postgres"], "127.0.0.1", 5433).state, "healthy");
+  assert.equal(classifyComposePsIdentity(matching, "infrastructure", ["postgres"], "127.0.0.1", 5433).reason, "project");
+  const rows = classifyComposePsIdentity(matching, project, ["postgres"], "127.0.0.1", 5433).rows;
+  assert.equal(composeRowsUseConfigFile(rows, "C:\\repo\\infrastructure\\docker-compose.yml"), true);
+  assert.equal(composeRowsUseConfigFile(rows, "C:\\repo\\compose.yml"), false);
+
+  const stopped = matching.replace('"State":"running"', '"State":"exited"');
+  assert.equal(classifyComposePsIdentity(stopped, project, ["postgres"], "127.0.0.1", 5433).state, "stopped");
 });

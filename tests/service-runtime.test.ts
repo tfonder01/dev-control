@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { findAvailablePort } from "../lib/projects/port-allocation.ts";
-import { javaCheckCommand, packageScriptCommand, requiresWindowsCommandShell, springLaunchArgs, springWrapperCommand } from "../lib/projects/service-commands.ts";
+import { classifyManagedProcessExit } from "../lib/projects/process-exit.ts";
+import { javaCheckCommand, nextPackageScriptCommand, packageScriptCommand, requiresWindowsCommandShell, springLaunchArgs, springWrapperCommand } from "../lib/projects/service-commands.ts";
 import type { ProjectService } from "../lib/workspace/types.ts";
 
 function service(overrides: Partial<ProjectService> & Pick<ProjectService, "id" | "name" | "path" | "relativePath" | "kind">): ProjectService {
@@ -24,6 +25,21 @@ function service(overrides: Partial<ProjectService> & Pick<ProjectService, "id" 
   };
 }
 
+test("classifies a nonzero exit during a requested managed stop separately from a crash", () => {
+  assert.deepEqual(classifyManagedProcessExit(true, 1, "Backend", "Build failed."), {
+    state: "stopped",
+    message: "Managed shutdown verified by DevHub.",
+    exitClassification: "managed-stop",
+    exitCode: 1,
+  });
+  assert.deepEqual(classifyManagedProcessExit(false, 1, "Backend", "Build failed."), {
+    state: "failed",
+    message: "Build failed.",
+    exitClassification: "unexpected-exit",
+    exitCode: 1,
+  });
+});
+
 test("builds fixed Next.js commands in the service working directory", () => {
   const frontend = service({
     id: "AAAAAAAAAAAAAAAA",
@@ -31,6 +47,7 @@ test("builds fixed Next.js commands in the service working directory", () => {
     path: "C:\\repo\\frontend",
     relativePath: "frontend",
     kind: "node",
+    technologies: [{ name: "Next.js", tone: "slate" }],
     capabilities: {
       packageManager: "pnpm",
       packageScripts: ["dev", "build", "start"],
@@ -47,7 +64,48 @@ test("builds fixed Next.js commands in the service working directory", () => {
     args: ["dev"],
     cwd: "C:\\repo\\frontend",
   });
+  assert.deepEqual(nextPackageScriptCommand(frontend, "dev", "127.0.0.1", 3002, "win32"), {
+    executable: "pnpm.cmd",
+    args: ["dev", "--hostname", "127.0.0.1", "--port", "3002"],
+    cwd: "C:\\repo\\frontend",
+  });
+  assert.deepEqual(packageScriptCommand(frontend, "build", "win32"), {
+    executable: "pnpm.cmd",
+    args: ["build"],
+    cwd: "C:\\repo\\frontend",
+  });
+  assert.deepEqual(nextPackageScriptCommand(frontend, "start", "127.0.0.1", 3002, "win32"), {
+    executable: "pnpm.cmd",
+    args: ["start", "--hostname", "127.0.0.1", "--port", "3002"],
+    cwd: "C:\\repo\\frontend",
+  });
   assert.throws(() => packageScriptCommand(frontend, "test", "win32"));
+  assert.throws(() => nextPackageScriptCommand(frontend, "dev", "127.0.0.1", 0, "win32"));
+  assert.throws(() => nextPackageScriptCommand(frontend, "dev", "127.0.0.1 & whoami", 3002, "win32"));
+});
+
+test("forwards explicit Next.js bindings through npm's argument separator", () => {
+  const frontend = service({
+    id: "NNNNNNNNNNNNNNNN",
+    name: "frontend",
+    path: "C:\\repo\\frontend",
+    relativePath: "frontend",
+    kind: "node",
+    technologies: [{ name: "Next.js", tone: "slate" }],
+    capabilities: {
+      packageManager: "npm",
+      packageScripts: ["dev", "start"],
+      hasMavenWrapper: false,
+      hasGradleWrapper: false,
+      hasSpringBoot: false,
+      javaBuildTool: null,
+      devPortHint: 3000,
+      devPortSource: "framework-default",
+    },
+  });
+  assert.deepEqual(nextPackageScriptCommand(frontend, "start", "127.0.0.1", 3002, "win32").args, [
+    "run", "start", "--", "--hostname", "127.0.0.1", "--port", "3002",
+  ]);
 });
 
 test("builds allowlisted Gradle wrapper launch and checks in the backend directory", () => {

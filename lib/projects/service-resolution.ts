@@ -5,6 +5,6 @@ export function resolveProjectService(repository: Repository, serviceId: string 
   return repository.services.find((service) => service.id === serviceId) ?? null;
 }
 
-export function serviceRuntimeKey(repositoryId: string, serviceId: string) {
-  return `${repositoryId}:${serviceId}`;
+export function serviceRuntimeKey(repositoryId: string, serviceId: string, runtimeScope?: string) {
+  return runtimeScope ? `${runtimeScope}:${repositoryId}:${serviceId}` : `${repositoryId}:${serviceId}`;
 }

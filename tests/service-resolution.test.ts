@@ -67,3 +67,10 @@ test("uses independent process ownership keys for services in one repository", (
     serviceRuntimeKey(repository.id, "BBBBBBBBBBBBBBBB"),
   );
 });
+
+test("scopes process ownership independently for each environment profile", () => {
+  assert.notEqual(
+    serviceRuntimeKey("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "workspace:sandbox"),
+    serviceRuntimeKey("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb", "workspace:trial"),
+  );
+});

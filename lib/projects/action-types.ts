@@ -24,6 +24,8 @@ export type DevServerStatus = {
   startedAt: string | null;
   message: string;
   output?: string;
+  exitClassification?: "managed-stop" | "unexpected-exit";
+  exitCode?: number | null;
   launchMode: NodeLaunchMode | null;
 };
 
@@ -57,11 +59,13 @@ export type DependencyServiceStatus = {
   displayName: string;
   service: string;
   endpoint: string | null;
-  state: "stopped" | "starting" | "ready" | "failed" | "unknown";
+  state: "stopped" | "starting" | "ready" | "failed" | "unknown" | "unverified";
+  diagnostic: string;
 };
 
 export type DependencyRuntimeStatus = {
   composeFile: string | null;
+  composeProject: string | null;
   services: DependencyServiceStatus[];
   ownedByDevHub: boolean;
   canStart: boolean;

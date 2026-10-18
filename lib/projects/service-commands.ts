@@ -24,6 +24,33 @@ export function packageScriptCommand(service: ProjectService, script: ProjectScr
   };
 }
 
+export function nextPackageScriptCommand(
+  service: ProjectService,
+  script: Extract<ProjectScript, "dev" | "start">,
+  hostname: string,
+  port: number,
+  platform: NodeJS.Platform = process.platform,
+): AllowlistedCommand {
+  if (!service.technologies.some((technology) => technology.name === "Next.js")) {
+    throw new Error("The service is not a detected Next.js application.");
+  }
+  if (!/^[A-Za-z0-9.:[\]-]+$/.test(hostname)) throw new Error("The Next.js hostname is invalid.");
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) throw new Error("The Next.js port is invalid.");
+
+  const command = packageScriptCommand(service, script, platform);
+  return {
+    ...command,
+    args: [
+      ...command.args,
+      ...(service.capabilities.packageManager === "npm" ? ["--"] : []),
+      "--hostname",
+      hostname,
+      "--port",
+      String(port),
+    ],
+  };
+}
+
 export function springLaunchArgs(service: ProjectService, port: number, springProfile: string | null = null) {
   // Keep long-running bootRun work in a session-scoped process tree instead of a reusable global Gradle daemon.
   if (service.capabilities.javaBuildTool === "gradle") {

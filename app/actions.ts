@@ -12,6 +12,8 @@ import { resolveProjectLinks, resolveWorkspaceLinks, saveProjectLinks, saveWorks
 import type { ProjectLinksActionResult, WorkspaceLinksActionResult } from "@/lib/projects/project-links-types";
 import { parseProjectLinksForm, parseWorkspaceLinksForm } from "@/lib/projects/project-links-validation";
 import { startDependencies, stopDependencies } from "@/lib/projects/dependencies";
+import type { EnvironmentActionRequest } from "@/lib/projects/environment-action-handler";
+import { runEnvironmentAction } from "@/lib/projects/environment-service";
 import { startDevServer, startPreviewServer, stopDevServer } from "@/lib/projects/processes";
 import { resolveProjectService } from "@/lib/projects/service-resolution";
 import { resolveSafeDestination, type ProjectType, validateGithubUrl } from "@/lib/projects/validation";
@@ -37,6 +39,10 @@ export async function refreshWorkspaceAction(): Promise<RefreshWorkspaceState> {
   } catch {
     return { status: "error", message: "Workspace refresh failed." };
   }
+}
+
+export async function runEnvironmentProfileAction(request: EnvironmentActionRequest) {
+  return runEnvironmentAction(request);
 }
 
 function value(formData: FormData, name: string) {

@@ -6,8 +6,10 @@ import { ArrowLeft, Box, Check, FileCode2, FolderGit2, GitBranch, GitCommitHoriz
 import { formatActivity, PageShell, RepositoryState, TechnologyBadge } from "@/app/components";
 import { ProjectActionsPanel } from "@/app/project-actions-panel";
 import { GitActionsPanel } from "@/app/git-actions-panel";
+import { EnvironmentProfilesPanel } from "@/app/environment-profiles-panel";
 import { ProjectLinksPanel } from "@/app/project-links-panel";
 import { getDependencyStatus } from "@/lib/projects/dependencies";
+import { getEnvironmentCatalogForRepository } from "@/lib/projects/environment-service";
 import { detectProjectLinks } from "@/lib/projects/project-link-detection";
 import { getProjectLinks, resolveProjectLinks } from "@/lib/projects/project-links";
 import { detectRunningDevServer } from "@/lib/projects/processes";
@@ -21,7 +23,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
   const { id } = await params;
   const repository = await getRepositoryFromSnapshot(id);
   if (!repository) notFound();
-  const [serviceModels, projectLinksConfig, detectedProjectLinks] = await Promise.all([
+  const [serviceModels, projectLinksConfig, detectedProjectLinks, environmentCatalog] = await Promise.all([
     Promise.all(repository.services.map(async (service): Promise<ProjectServiceActionsModel> => {
       const isSpringBoot = service.kind === "spring-boot";
       const isNextJs = service.technologies.some((technology) => technology.name === "Next.js");
@@ -49,6 +51,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
     })),
     getProjectLinks(repository.id),
     detectProjectLinks(repository),
+    getEnvironmentCatalogForRepository(repository.id),
   ]);
 
   return (
@@ -79,6 +82,8 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
       />
 
       <GitActionsPanel repositoryId={repository.id} initialGit={repository.git} />
+
+      <EnvironmentProfilesPanel repositoryId={repository.id} initialCatalog={environmentCatalog} />
 
       <ProjectActionsPanel
         repositoryId={repository.id}

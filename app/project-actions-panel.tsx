@@ -224,11 +224,12 @@ function ServiceActionsCard({ repositoryId, initialModel }: { repositoryId: stri
                   <ul>
                     {dependencies.services.map((dependency) => (
                       <li key={dependency.service}>
-                        <span><strong>{dependency.displayName}</strong><small>{dependency.service}{dependency.endpoint ? ` · ${dependency.endpoint}` : ""}</small></span>
-                        <span className={`dependency-state dependency-${dependency.state}`}>{dependency.state === "ready" ? "Ready" : dependency.state === "starting" ? "Starting..." : dependency.state === "failed" ? "Failed" : dependency.state === "unknown" ? "Detected" : "Stopped"}</span>
+                        <span><strong>{dependency.displayName}</strong><small>{dependency.service}{dependency.endpoint ? ` · ${dependency.endpoint}` : ""}</small><small>{dependency.diagnostic}</small></span>
+                        <span className={`dependency-state dependency-${dependency.state}`}>{dependency.state === "ready" ? "Ready" : dependency.state === "starting" ? "Starting..." : dependency.state === "failed" ? "Failed" : dependency.state === "unverified" ? "Unverified" : dependency.state === "unknown" ? "Unavailable" : "Stopped"}</span>
                       </li>
                     ))}
                   </ul>
+                  {dependencies.composeProject && <p className="dependency-identity">Compose project <code>{dependencies.composeProject}</code></p>}
                   {(dependencies.canStart || dependencies.canStop) && (
                     <div className="action-buttons">
                       {dependencies.canStop
