@@ -4,6 +4,7 @@ import { useMemo, useState, useTransition } from "react";
 import { ExternalLink, LoaderCircle, Play, RefreshCw, RotateCcw, ShieldAlert, Square, Workflow } from "lucide-react";
 
 import { runEnvironmentProfileAction } from "./actions";
+import { EnvironmentManager } from "./environment-manager";
 import {
   environmentControlState,
   type EnvironmentActionResponse,
@@ -26,7 +27,7 @@ function profileLaunchModes(profile: EnvironmentProfileView | null) {
 
 export function EnvironmentProfilesPanel({ repositoryId, initialCatalog }: Props) {
   const [catalog, setCatalog] = useState(initialCatalog);
-  const [workspaceId, setWorkspaceId] = useState(initialCatalog.workspaces[0]?.id ?? "");
+  const workspaceId = initialCatalog.workspaces[0]?.id ?? "";
   const selectedWorkspace = catalog.workspaces.find((workspace) => workspace.id === workspaceId) ?? catalog.workspaces[0] ?? null;
   const [profileId, setProfileId] = useState(selectedWorkspace?.profiles[0]?.id ?? "");
   const selectedProfile = selectedWorkspace?.profiles.find((profile) => profile.id === profileId) ?? selectedWorkspace?.profiles[0] ?? null;
@@ -37,7 +38,7 @@ export function EnvironmentProfilesPanel({ repositoryId, initialCatalog }: Props
   const [isPending, startTransition] = useTransition();
   const controls = useMemo(() => selectedProfile ? environmentControlState(selectedProfile, isPending) : null, [selectedProfile, isPending]);
 
-  if (!selectedWorkspace || !selectedProfile) {
+  if (!selectedWorkspace) {
     if (!initialCatalog.error) return null;
     return <section className="environment-panel"><p className="runtime-guidance">{initialCatalog.error}</p></section>;
   }
@@ -53,6 +54,7 @@ export function EnvironmentProfilesPanel({ repositoryId, initialCatalog }: Props
   };
 
   const run = (action: EnvironmentLifecycleAction) => {
+    if (!selectedProfile) return;
     setActiveAction(action);
     setResult(null);
     startTransition(async () => {
@@ -82,33 +84,32 @@ export function EnvironmentProfilesPanel({ repositoryId, initialCatalog }: Props
       {isPending && activeAction === action ? `${label}...` : label}
     </button>
   );
-  const nodeServices = selectedProfile.services.filter((service) => service.defaultLaunchMode);
+  const nodeServices = selectedProfile?.services.filter((service) => service.defaultLaunchMode) ?? [];
   const modeChangePending = nodeServices.some((service) => service.runningLaunchMode && launchModes[service.id] !== service.runningLaunchMode);
 
   return (
     <section className="environment-panel" aria-labelledby="environment-panel-title">
       <div className="project-actions-heading">
         <div><p className="eyebrow">Workspace</p><h2 id="environment-panel-title">Environment profiles</h2></div>
-        <span className={`environment-state environment-${selectedProfile.state}`}><span aria-hidden="true" />{stateLabels[selectedProfile.state]}</span>
+        {selectedProfile && <span className={`environment-state environment-${selectedProfile.state}`}><span aria-hidden="true" />{stateLabels[selectedProfile.state]}</span>}
       </div>
 
       <div className="environment-selectors">
-        <label>Application<select value={selectedWorkspace.id} disabled={isPending} onChange={(event) => {
-          const workspace = catalog.workspaces.find((candidate) => candidate.id === event.target.value);
-           setWorkspaceId(event.target.value);
-           setProfileId(workspace?.profiles[0]?.id ?? "");
-           setLaunchModes(profileLaunchModes(workspace?.profiles[0] ?? null));
-          setConfirmedRealData(false);
-          setResult(null);
-        }}>{catalog.workspaces.map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</select></label>
-         <label>Environment<select value={selectedProfile.id} disabled={isPending} onChange={(event) => {
+        {selectedWorkspace.profiles.length > 1 ? <label>Environment<select value={selectedProfile?.id ?? ""} disabled={isPending} onChange={(event) => {
           const profile = selectedWorkspace.profiles.find((candidate) => candidate.id === event.target.value) ?? null;
           setProfileId(event.target.value);
           setLaunchModes(profileLaunchModes(profile));
           setConfirmedRealData(false);
           setResult(null);
         }}>{selectedWorkspace.profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></label>
+          : <div className="environment-single-selection"><span>Environment</span><strong>{selectedProfile?.name ?? "No environments configured"}</strong></div>}
       </div>
+
+      <EnvironmentManager repositoryId={repositoryId} workspaceId={selectedWorkspace.id} management={selectedWorkspace.management} disabled={isPending} />
+
+      {!selectedProfile && <p className="runtime-guidance">Create an environment from an approved trusted service template to enable lifecycle controls.</p>}
+
+      {selectedProfile && <>
 
       {nodeServices.map((service) => {
         const selectedMode = launchModes[service.id] ?? service.defaultLaunchMode!;
@@ -171,6 +172,7 @@ export function EnvironmentProfilesPanel({ repositoryId, initialCatalog }: Props
 
       {selectedProfile.guidance.length > 0 && <div className="environment-guidance"><strong>Recovery guidance</strong><ul>{selectedProfile.guidance.map((item) => <li key={item}>{item}</li>)}</ul></div>}
       {result && <div className={`action-result action-result-${result.status}`} role="status" aria-live="polite"><div><strong>{result.message}</strong></div></div>}
+      </>}
     </section>
   );
 }

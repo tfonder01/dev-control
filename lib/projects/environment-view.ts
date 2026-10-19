@@ -1,5 +1,6 @@
 import type { EnvironmentProfile, WorkspaceEnvironmentConfig } from "./environment-config";
 import type { NodeLaunchMode } from "./action-types";
+import type { EnvironmentManagementView } from "./environment-management";
 import type {
   EnvironmentOperationResult,
   EnvironmentOwnership,
@@ -39,6 +40,7 @@ export type EnvironmentWorkspaceView = {
   id: string;
   name: string;
   profiles: EnvironmentProfileView[];
+  management: EnvironmentManagementView;
 };
 
 export type EnvironmentCatalogView = {
@@ -168,6 +170,7 @@ export function environmentControlState(profile: EnvironmentProfileView, pending
 export function workspaceView(
   config: WorkspaceEnvironmentConfig,
   profiles: EnvironmentProfileView[],
+  management: EnvironmentManagementView,
 ): EnvironmentWorkspaceView {
-  return { id: config.id, name: config.name, profiles };
+  return { id: config.id, name: config.name, profiles, management };
 }

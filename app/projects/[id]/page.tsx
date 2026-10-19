@@ -83,7 +83,11 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
 
       <GitActionsPanel repositoryId={repository.id} initialGit={repository.git} />
 
-      <EnvironmentProfilesPanel repositoryId={repository.id} initialCatalog={environmentCatalog} />
+      <EnvironmentProfilesPanel
+        key={environmentCatalog.workspaces.map((workspace) => `${workspace.id}:${workspace.management.revision}`).join("|")}
+        repositoryId={repository.id}
+        initialCatalog={environmentCatalog}
+      />
 
       <ProjectActionsPanel
         repositoryId={repository.id}

@@ -1,9 +1,14 @@
 import "server-only";
 
-import { loadEnvironmentProfileCatalog } from "./environment-config-store";
+import { loadEnvironmentProfileCatalog, loadManagedEnvironmentConfig, saveManagedEnvironmentConfig } from "./environment-config-store";
 import type { EnvironmentProfile, WorkspaceEnvironmentConfig } from "./environment-config";
 import { createEnvironmentActionHandler, type AuthorizedEnvironmentTarget } from "./environment-action-handler";
 import { createWorkspaceEnvironmentOrchestrator } from "./environment-runtime";
+import {
+  buildEnvironmentManagementView,
+  createEnvironmentManagementHandler,
+  type EnvironmentManagementRequest,
+} from "./environment-management";
 import type { EnvironmentOperationResult } from "./environment-orchestrator";
 import {
   buildEnvironmentProfileView,
@@ -125,12 +130,27 @@ async function resolveTarget(repositoryId: string, workspaceId: string, profileI
 
 const handleEnvironmentAction = createEnvironmentActionHandler(resolveTarget);
 
+const handleEnvironmentManagement = createEnvironmentManagementHandler({
+  loadCatalog: () => loadEnvironmentProfileCatalog(),
+  loadManaged: () => loadManagedEnvironmentConfig(),
+  saveManaged: (config, revision) => saveManagedEnvironmentConfig(config, revision),
+  isStopped: async (workspace, profile) => {
+    const snapshot = await getWorkspaceSnapshot();
+    const result = await operationFor(workspace, profile, snapshot.repositories, "inspect", true);
+    return result.services.every((service) => service.state === "stopped");
+  },
+});
+
 export async function runEnvironmentAction(input: unknown) {
   try {
     return await handleEnvironmentAction(input);
   } catch {
     return { status: "error", message: "The environment action could not be completed safely.", profile: null } satisfies EnvironmentActionResponse;
   }
+}
+
+export async function manageEnvironmentProfile(input: EnvironmentManagementRequest | unknown) {
+  return handleEnvironmentManagement(input);
 }
 
 export async function getEnvironmentCatalogForRepository(repositoryId: string): Promise<EnvironmentCatalogView> {
@@ -144,7 +164,7 @@ export async function getEnvironmentCatalogForRepository(repositoryId: string): 
         profile,
         await operationFor(config, profile, snapshot.repositories, "inspect", true),
       )));
-      return workspaceView(config, profiles);
+      return workspaceView(config, profiles, buildEnvironmentManagementView(catalog, config));
     }));
     return { workspaces, error: null };
   } catch {
