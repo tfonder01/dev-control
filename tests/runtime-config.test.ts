@@ -156,23 +156,25 @@ test("launched Next.js runtimes prefer repository env while retaining DevHub's p
   assert.deepEqual(JSON.parse(stdout), { provider: "google", port: "4317" });
 });
 
-test("Preview build and start environments retain profile API settings and fixed mode bindings", () => {
+test("Production Trial Preview build and start receive documented non-secret settings without a frontend env file", () => {
   const runtime = { NODE_ENV: "production", PATH: "C:\\tools" } as NodeJS.ProcessEnv;
   const profile = {
     NODE_ENV: "development",
-    SENTRYWEALTH_API_URL: "http://127.0.0.1:8080",
-    NEXT_PUBLIC_SENTRYWEALTH_ENVIRONMENT: "sandbox",
+    SENTRYWEALTH_API_URL: "http://127.0.0.1:8180",
+    NEXT_PUBLIC_SENTRYWEALTH_DISPLAY_TIME_ZONE: "America/New_York",
+    NEXT_PUBLIC_SENTRYWEALTH_ENVIRONMENT: "production-trial",
   } as NodeJS.ProcessEnv;
   const build = createNodeProcessEnvironment(runtime, profile);
-  const start = createNodeProcessEnvironment(runtime, profile, { host: "127.0.0.1", port: 3002 });
+  const start = createNodeProcessEnvironment(runtime, profile, { host: "127.0.0.1", port: 3100 });
 
   for (const environment of [build, start]) {
     assert.equal(environment.NODE_ENV, "production");
-    assert.equal(environment.SENTRYWEALTH_API_URL, "http://127.0.0.1:8080");
-    assert.equal(environment.NEXT_PUBLIC_SENTRYWEALTH_ENVIRONMENT, "sandbox");
+    assert.equal(environment.SENTRYWEALTH_API_URL, "http://127.0.0.1:8180");
+    assert.equal(environment.NEXT_PUBLIC_SENTRYWEALTH_DISPLAY_TIME_ZONE, "America/New_York");
+    assert.equal(environment.NEXT_PUBLIC_SENTRYWEALTH_ENVIRONMENT, "production-trial");
   }
   assert.equal(build.PORT, undefined);
-  assert.equal(start.PORT, "3002");
+  assert.equal(start.PORT, "3100");
   assert.equal(start.HOSTNAME, "127.0.0.1");
 });
 

@@ -1,10 +1,13 @@
 import net from "node:net";
+import * as https from "node:https";
+import * as tls from "node:tls";
 
 import {
   environmentRuntimeScope,
   environmentServiceOrder,
   type DockerHealthCheck,
   type EnvironmentHealthCheck,
+  type HttpHealthCheck,
   type EnvironmentProfile,
   type EnvironmentService,
   type WorkspaceEnvironmentConfig,
@@ -35,6 +38,7 @@ export type EnvironmentAdapterContext = {
   runtimeScope: string;
   environment: NodeJS.ProcessEnv;
   redactions: string[];
+  sources: EnvironmentFileStatus[];
 };
 
 export type EnvironmentPreflightIssue = {
@@ -129,6 +133,41 @@ async function retryDockerHealthProbe(
   };
 }
 
+export function strictHttpsHealthOptions(trustStore: HttpHealthCheck["trustStore"]) {
+  if (trustStore !== "system") return { rejectUnauthorized: true as const };
+  const certificateProvider = tls as typeof tls & { getCACertificates?: (type: "system") => string[] };
+  if (!certificateProvider.getCACertificates) throw new Error("The Node runtime cannot read the system certificate store.");
+  return { rejectUnauthorized: true as const, ca: certificateProvider.getCACertificates("system") };
+}
+
+function httpsStatusReachable(check: HttpHealthCheck, requestTimeoutMs: number) {
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (result: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+    let request: ReturnType<typeof https.request>;
+    try {
+      request = https.request(check.url, {
+        method: "GET",
+        timeout: requestTimeoutMs,
+        ...strictHttpsHealthOptions(check.trustStore),
+      }, (response) => {
+        response.resume();
+        finish(check.expectedStatuses.includes(response.statusCode ?? 0));
+      });
+    } catch {
+      finish(false);
+      return;
+    }
+    request.once("timeout", () => request.destroy(new Error("HTTPS health check timed out.")));
+    request.once("error", () => finish(false));
+    request.end();
+  });
+}
+
 export const runEnvironmentHealthChecks: EnvironmentHealthRunner = async (checks, observation, adapter, context) => {
   if (checks.length === 0) {
     return {
@@ -153,6 +192,9 @@ export const runEnvironmentHealthChecks: EnvironmentHealthRunner = async (checks
       continue;
     }
     const healthy = await retryProbe(async () => {
+      if (new URL(check.url).protocol === "https:" && check.trustStore === "system") {
+        return httpsStatusReachable(check, Math.min(check.timeoutMs, 2_000));
+      }
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), Math.min(check.timeoutMs, 2_000));
       try {
@@ -288,7 +330,18 @@ export class EnvironmentOrchestrator {
           const context = await this.context(other, service, false);
           const observation = await this.adapters[service.adapter].inspect(context);
           if (observation.state !== "stopped") {
-            issues.push({ serviceId: null, code: "external-profile", message: `${other.name} is active or observed. Stop it before starting ${profile.name}.` });
+            const reason = observation.ownership === "unverified"
+              ? `could not be verified: ${observation.message}`
+              : observation.ownership === "external"
+                ? "is running externally"
+                : observation.ownership === "devhub"
+                  ? "is running in this DevHub session"
+                  : `reported ${observation.state}`;
+            issues.push({
+              serviceId: service.id,
+              code: "external-profile",
+              message: `${other.name} blocks ${profile.name}: ${service.name} ${reason}. Stop that service before starting ${profile.name}.`,
+            });
             break;
           }
         }

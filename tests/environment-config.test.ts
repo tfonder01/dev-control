@@ -11,7 +11,7 @@ import {
   parseWorkspaceEnvironmentConfigFile,
 } from "../lib/projects/environment-config.ts";
 import { resolveExternalEnvironmentFile, resolveRepositoryEnvironmentFile } from "../lib/projects/environment-file-resolution.ts";
-import { buildExplicitComposeCommandArgs, classifyComposePsIdentity, devHubComposeProjectName, devHubComposeVolumeName, devHubDependencyComposeProjectId, redactRuntimeOutput, summarizeRuntimeOutput } from "../lib/projects/runtime-config.ts";
+import { buildComposeContainerStateArgs, buildExplicitComposeCommandArgs, classifyComposeContainerState, classifyComposePsIdentity, devHubComposeProjectName, devHubComposeVolumeName, devHubDependencyComposeProjectId, redactRuntimeOutput, summarizeRuntimeOutput } from "../lib/projects/runtime-config.ts";
 
 function validWorkspace() {
   return {
@@ -203,6 +203,112 @@ test("tracked SentryWealth Sandbox manifest validates with deterministic depende
   assert.equal(JSON.stringify(manifest).includes("PLAID_SECRET"), false);
 });
 
+test("tracked SentryWealth Production Trial preserves existing identities and the four-service safety chain", async () => {
+  const manifest = JSON.parse(await readFile(path.resolve("config", "environment-profiles.json"), "utf8"));
+  const parsed = parseWorkspaceEnvironmentConfigFile(manifest);
+  assert.equal(parsed.ok, true);
+  if (!parsed.ok) return;
+  const workspace = parsed.config.workspaces.find((candidate) => candidate.id === "sentrywealth");
+  assert.ok(workspace);
+  const trial = workspace.profiles.find((candidate) => candidate.id === "production-trial");
+  assert.ok(trial);
+  assert.equal(trial.risk, "real-data");
+  assert.equal(trial.exclusiveGroup, "sentrywealth-environment");
+  assert.equal(trial.loopbackOnly, true);
+  assert.equal(trial.openUrl, "https://localhost:3443/");
+
+  const order = environmentServiceOrder(trial);
+  assert.equal(order.ok, true);
+  if (order.ok) {
+    assert.deepEqual(order.startup.map((service) => service.id), ["trial-database", "trial-backend", "trial-frontend", "trial-caddy"]);
+    assert.deepEqual(order.shutdown.map((service) => service.id), ["trial-caddy", "trial-frontend", "trial-backend", "trial-database"]);
+  }
+
+  const database = trial.services.find((service) => service.id === "trial-database");
+  assert.equal(database?.adapter, "docker-compose");
+  if (database?.adapter === "docker-compose") {
+    assert.equal(database.projectName, "sentrywealth-production-trial");
+    assert.equal(database.composeFile, "infrastructure/docker-compose.production-trial.yml");
+    assert.deepEqual(database.services, ["postgres-trial"]);
+    assert.equal(database.host, "127.0.0.1");
+    assert.equal(database.port, 5434);
+    assert.deepEqual(database.environmentFiles, [{ source: "external", reference: "production-trial-compose" }]);
+  }
+
+  const backend = trial.services.find((service) => service.id === "trial-backend");
+  assert.equal(backend?.adapter === "spring-boot" ? backend.springProfile : null, "production-trial");
+  assert.equal(backend?.port, 8180);
+  assert.deepEqual(backend?.environment, {});
+
+  const frontend = trial.services.find((service) => service.id === "trial-frontend");
+  assert.equal(frontend?.adapter === "node" ? frontend.launchMode : null, "preview");
+  assert.equal(frontend?.port, 3100);
+  assert.equal(frontend?.environment.SENTRYWEALTH_API_URL, "http://127.0.0.1:8180");
+  assert.equal(frontend?.environment.NEXT_PUBLIC_SENTRYWEALTH_ENVIRONMENT, "production-trial");
+  assert.equal(frontend?.environment.NEXT_PUBLIC_SENTRYWEALTH_DISPLAY_TIME_ZONE, "America/New_York");
+  assert.deepEqual(frontend?.environmentFiles, []);
+
+  const caddy = trial.services.find((service) => service.id === "trial-caddy");
+  assert.equal(caddy?.adapter, "process");
+  if (caddy?.adapter === "process") {
+    assert.equal(caddy.executable, "caddy.exe");
+    assert.deepEqual(caddy.args, ["run", "--config", "Caddyfile"]);
+    assert.deepEqual(caddy.stop, { executable: "caddy.exe", args: ["stop"] });
+    assert.deepEqual(caddy.workingDirectory, { repository: "application", path: "infrastructure/production-trial" });
+    assert.equal(caddy.port, 3443);
+    assert.equal(caddy.healthChecks[0]?.type, "http");
+    if (caddy.healthChecks[0]?.type === "http") {
+      assert.equal(caddy.healthChecks[0].url, "https://localhost:3443/");
+      assert.equal(caddy.healthChecks[0].allowInvalidCertificate, false);
+      assert.equal(caddy.healthChecks[0].trustStore, "system");
+    }
+  }
+
+  assert.deepEqual(workspace.externalEnvironmentFiles.map((reference) => reference.pathVariable), [
+    "DEVHUB_SENTRYWEALTH_TRIAL_DB_ENV_FILE",
+    "DEVHUB_SENTRYWEALTH_TRIAL_BACKEND_ENV_FILE",
+  ]);
+  assert.equal(JSON.stringify(trial).includes("PLAID_ENABLED"), false);
+  assert.equal(JSON.stringify(trial).includes("PLAID_PRODUCTION_TRIAL_ACKNOWLEDGED"), false);
+
+  const compose = await readFile(path.resolve("..", "SentryWealth", "infrastructure", "docker-compose.production-trial.yml"), "utf8");
+  assert.match(compose, /^name:\s*sentrywealth-production-trial\s*$/m);
+  assert.match(compose, /^\s{2}postgres-trial:\s*$/m);
+  assert.match(compose, /^\s{4}name:\s*sentrywealth_production_trial_data\s*$/m);
+
+  const caddyfile = await readFile(path.resolve("..", "SentryWealth", "infrastructure", "production-trial", "Caddyfile"), "utf8");
+  assert.match(caddyfile, /skip_install_trust/);
+  assert.match(caddyfile, /https:\/\/localhost:3443/);
+  assert.match(caddyfile, /bind\s+127\.0\.0\.1/);
+  assert.match(caddyfile, /reverse_proxy\s+127\.0\.0\.1:3100/);
+});
+
+test("HTTP health checks accept only strict default or system trust stores", () => {
+  const input = validWorkspace();
+  input.profiles[0].services[0].healthChecks = [{
+    type: "http",
+    url: "https://localhost:3443",
+    expectedStatuses: [200],
+    allowInvalidCertificate: false,
+    trustStore: "system",
+  }] as never[];
+  const parsed = parseWorkspaceEnvironmentConfig(input);
+  assert.equal(parsed.ok, true);
+  if (parsed.ok && parsed.config.profiles[0].services[0].healthChecks[0].type === "http") {
+    assert.equal(parsed.config.profiles[0].services[0].healthChecks[0].trustStore, "system");
+  }
+  input.profiles[0].services[0].healthChecks[0] = {
+    type: "http",
+    url: "https://localhost:3443",
+    expectedStatuses: [200],
+    allowInvalidCertificate: false,
+    trustStore: "insecure",
+  } as never;
+  const rejected = parseWorkspaceEnvironmentConfig(input);
+  assert.equal(rejected.ok, false);
+  if (!rejected.ok) assert.ok(rejected.issues.some((candidate) => candidate.path.endsWith(".trustStore")));
+});
+
 test("strictly validates the top-level environment configuration file", () => {
   const parsed = parseWorkspaceEnvironmentConfigFile({ version: 1, workspaces: [validWorkspace()] });
   assert.equal(parsed.ok, true);
@@ -237,7 +343,28 @@ test("explicit Compose commands preserve project and service identity without de
   assert.deepEqual(buildExplicitComposeCommandArgs("wealth-trial", composePath, "stop", ["postgres-trial"]), [
     "compose", "--project-name", "wealth-trial", "--file", composePath, "stop", "--timeout", "10", "postgres-trial",
   ]);
+  const privateEnvironment = path.resolve("fixtures", "trial.env");
+  assert.deepEqual(buildExplicitComposeCommandArgs("wealth-trial", composePath, "status", ["postgres-trial"], [privateEnvironment]), [
+    "compose", "--env-file", privateEnvironment, "--project-name", "wealth-trial", "--file", composePath, "ps", "--format", "json", "postgres-trial",
+  ]);
   assert.throws(() => buildExplicitComposeCommandArgs("bad project", composePath, "start", ["postgres"]));
+  assert.throws(() => buildExplicitComposeCommandArgs("wealth-trial", composePath, "status", ["postgres-trial"], ["relative.env"]));
+  assert.deepEqual(buildComposeContainerStateArgs("wealth-trial"), [
+    "container", "ls", "--all", "--filter", "label=com.docker.compose.project=wealth-trial", "--format", "{{json .}}",
+  ]);
+  assert.throws(() => buildComposeContainerStateArgs("bad project"));
+});
+
+test("stopped Compose containers remain stopped without loading launch environment files", () => {
+  const labels = "com.docker.compose.project=wealth-trial,com.docker.compose.service=postgres-trial";
+  const exited = JSON.stringify({ Labels: labels, State: "exited", Status: "Exited (0) 16 hours ago" });
+  assert.equal(classifyComposeContainerState(exited, "wealth-trial", ["postgres-trial"]).state, "stopped");
+  assert.equal(classifyComposeContainerState("", "wealth-trial", ["postgres-trial"]).state, "stopped");
+  const running = JSON.stringify({ Labels: labels, State: "running", Status: "Up 10 seconds" });
+  assert.equal(classifyComposeContainerState(running, "wealth-trial", ["postgres-trial"]).state, "active-or-unverifiable");
+  const unknown = JSON.stringify({ Labels: labels, State: "removing" });
+  assert.equal(classifyComposeContainerState(unknown, "wealth-trial", ["postgres-trial"]).state, "active-or-unverifiable");
+  assert.equal(classifyComposeContainerState("not-json", "wealth-trial", ["postgres-trial"]).state, "active-or-unverifiable");
 });
 
 test("Compose status requires the configured project, services, fixed port, and loopback publisher", () => {

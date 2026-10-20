@@ -11,7 +11,18 @@
           "repositoryId": "mbl4t3RoIqL2ePxO"
         }
       ],
-      "externalEnvironmentFiles": [],
+      "externalEnvironmentFiles": [
+        {
+          "id": "production-trial-compose",
+          "pathVariable": "DEVHUB_SENTRYWEALTH_TRIAL_DB_ENV_FILE",
+          "relativePath": null
+        },
+        {
+          "id": "production-trial-backend",
+          "pathVariable": "DEVHUB_SENTRYWEALTH_TRIAL_BACKEND_ENV_FILE",
+          "relativePath": null
+        }
+      ],
       "profiles": [
         {
           "id": "sandbox",
@@ -108,6 +119,126 @@
                   "expectedStatuses": [200, 302, 307, 308],
                   "timeoutMs": 90000,
                   "allowInvalidCertificate": false
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "production-trial",
+          "name": "Production Trial",
+          "risk": "real-data",
+          "exclusiveGroup": "sentrywealth-environment",
+          "loopbackOnly": true,
+          "openUrl": "https://localhost:3443",
+          "services": [
+            {
+              "id": "trial-database",
+              "name": "PostgreSQL Trial",
+              "adapter": "docker-compose",
+              "repository": "application",
+              "composeFile": "infrastructure/docker-compose.production-trial.yml",
+              "projectName": "sentrywealth-production-trial",
+              "services": ["postgres-trial"],
+              "dependsOn": [],
+              "environment": {},
+              "environmentFiles": [
+                {
+                  "source": "external",
+                  "reference": "production-trial-compose"
+                }
+              ],
+              "host": "127.0.0.1",
+              "port": 5434,
+              "healthChecks": [
+                {
+                  "type": "docker-health",
+                  "service": "postgres-trial",
+                  "timeoutMs": 60000
+                }
+              ]
+            },
+            {
+              "id": "trial-backend",
+              "name": "Spring Boot Trial API",
+              "adapter": "spring-boot",
+              "repository": "application",
+              "serviceId": "5uwmxJzD4rY1MF2Z",
+              "springProfile": "production-trial",
+              "dependsOn": ["trial-database"],
+              "environment": {},
+              "environmentFiles": [
+                {
+                  "source": "external",
+                  "reference": "production-trial-backend"
+                }
+              ],
+              "host": "127.0.0.1",
+              "port": 8180,
+              "healthChecks": [
+                {
+                  "type": "http",
+                  "url": "http://127.0.0.1:8180/actuator/health",
+                  "expectedStatuses": [200],
+                  "timeoutMs": 90000,
+                  "allowInvalidCertificate": false
+                }
+              ]
+            },
+            {
+              "id": "trial-frontend",
+              "name": "Next.js Trial Frontend",
+              "adapter": "node",
+              "repository": "application",
+              "serviceId": "5Zg8jxlWd8AqEPgq",
+              "launchMode": "preview",
+              "dependsOn": ["trial-backend"],
+              "environment": {
+                "SENTRYWEALTH_API_URL": "http://127.0.0.1:8180",
+                "NEXT_PUBLIC_SENTRYWEALTH_DISPLAY_TIME_ZONE": "America/New_York",
+                "NEXT_PUBLIC_SENTRYWEALTH_ENVIRONMENT": "production-trial"
+              },
+              "environmentFiles": [],
+              "host": "127.0.0.1",
+              "port": 3100,
+              "healthChecks": [
+                {
+                  "type": "http",
+                  "url": "http://127.0.0.1:3100",
+                  "expectedStatuses": [200, 302, 307, 308],
+                  "timeoutMs": 90000,
+                  "allowInvalidCertificate": false
+                }
+              ]
+            },
+            {
+              "id": "trial-caddy",
+              "name": "Caddy HTTPS",
+              "adapter": "process",
+              "repository": "application",
+              "executable": "caddy.exe",
+              "args": ["run", "--config", "Caddyfile"],
+              "workingDirectory": {
+                "repository": "application",
+                "path": "infrastructure/production-trial"
+              },
+              "stop": {
+                "executable": "caddy.exe",
+                "args": ["stop"]
+              },
+              "dependsOn": ["trial-frontend"],
+              "environment": {},
+              "environmentFiles": [],
+              "host": "127.0.0.1",
+              "port": 3443,
+              "healthChecks": [
+                {
+                  "type": "http",
+                  "url": "https://localhost:3443",
+                  "expectedStatuses": [200, 302, 307, 308],
+                  "timeoutMs": 30000,
+                  "allowInvalidCertificate": false,
+                  "trustStore": "system"
                 }
               ]
             }

@@ -330,17 +330,32 @@ export function buildExplicitComposeCommandArgs(
   composePath: string,
   operation: "start" | "stop" | "status",
   services: string[],
+  environmentFiles: string[] = [],
 ) {
   if (!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(projectName)
     || !path.isAbsolute(composePath)
+    || environmentFiles.some((file) => !path.isAbsolute(file))
     || services.length === 0
     || services.some((service) => !/^[A-Za-z0-9_.-]+$/.test(service))) {
     throw new Error("Invalid trusted Compose profile metadata.");
   }
-  const base = ["compose", "--project-name", projectName, "--file", composePath];
+  const base = ["compose", ...environmentFiles.flatMap((file) => ["--env-file", file]), "--project-name", projectName, "--file", composePath];
   if (operation === "start") return [...base, "up", "--detach", ...services];
   if (operation === "stop") return [...base, "stop", "--timeout", "10", ...services];
   return [...base, "ps", "--format", "json", ...services];
+}
+
+export function buildComposeContainerStateArgs(projectName: string) {
+  if (!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(projectName)) throw new Error("Invalid trusted Compose project metadata.");
+  return [
+    "container",
+    "ls",
+    "--all",
+    "--filter",
+    `label=com.docker.compose.project=${projectName}`,
+    "--format",
+    "{{json .}}",
+  ];
 }
 
 export type ComposePsRecord = {
@@ -379,6 +394,24 @@ export function parseComposePsRecords(output: string): ComposePsRecord[] {
     }
     return rows;
   }
+}
+
+function composeLabel(labels: string | undefined, name: string) {
+  return (labels ?? "").split(",").find((label) => label.startsWith(`${name}=`))?.slice(name.length + 1) ?? null;
+}
+
+export function classifyComposeContainerState(output: string, projectName: string, services: string[]) {
+  const parsed = parseComposePsRecords(output);
+  if (output.trim() && parsed.length === 0) return { state: "active-or-unverifiable" as const, rows: parsed };
+  const rows = parsed.filter((row) => (
+    composeLabel(row.Labels, "com.docker.compose.project") === projectName
+    && services.includes(composeLabel(row.Labels, "com.docker.compose.service") ?? "")
+  ));
+  if (rows.length === 0) return { state: "stopped" as const, rows };
+  if (rows.every((row) => /^(created|dead|exited)$/i.test(row.State?.trim() ?? ""))) {
+    return { state: "stopped" as const, rows };
+  }
+  return { state: "active-or-unverifiable" as const, rows };
 }
 
 export function classifyComposePsIdentity(output: string, projectName: string, services: string[], expectedHost: string, expectedPort: number) {

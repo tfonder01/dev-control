@@ -19,7 +19,7 @@ import {
   type WindowsProcessEvidence,
 } from "./process-evidence";
 import { trackedRuntimePort } from "./process-output";
-import { unverifiedWindowsOwnershipPolicy } from "./process-lifecycle-policy";
+import { trustedGracefulStopPolicy, unverifiedWindowsOwnershipPolicy } from "./process-lifecycle-policy";
 import { createNodeProcessEnvironment } from "./runtime-environment";
 import { classifySpringFailureOutput, redactRuntimeOutput } from "./runtime-config";
 import { resolveSpringRuntime } from "./runtime-profile";
@@ -729,10 +729,24 @@ async function runTrustedStopCommand(command: TrustedManagedCommand) {
   });
 }
 
+async function canRunTrustedGracefulStop(entry: ManagedProcess) {
+  if (process.platform !== "win32") return true;
+  if (!entry.port || !await isPortListening(entry.port)) return false;
+  const listenerSnapshot = await readWindowsListenerSnapshot(entry.port);
+  const listenerVerified = Boolean(listenerSnapshot && listenerBelongsToWindowsLaunch(
+    listenerSnapshot.listener,
+    entry.rootProcess,
+    entry.listenerProcess,
+    listenerSnapshot.processes,
+  ));
+  if (listenerVerified && listenerSnapshot?.listener && !entry.listenerProcess) entry.listenerProcess = listenerSnapshot.listener;
+  return trustedGracefulStopPolicy(true, listenerVerified).runGracefulStop;
+}
+
 export async function stopTrustedManagedProcess(command: TrustedManagedCommand) {
   const current = runtime.processes.get(command.runtimeKey);
   if (!current) return { status: "error", message: "No DevHub-owned process is running for this service." } satisfies RepositoryActionResult;
-  if (command.gracefulStop) {
+  if (command.gracefulStop && await canRunTrustedGracefulStop(current)) {
     try {
       await runTrustedStopCommand(command);
       const deadline = Date.now() + 2_000;

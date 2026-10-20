@@ -6,11 +6,20 @@ import type { Repository } from "../lib/workspace/types.ts";
 import {
   EnvironmentOrchestrator,
   runEnvironmentHealthChecks,
+  strictHttpsHealthOptions,
   type EnvironmentAdapterContext,
   type EnvironmentAdapterRegistry,
   type EnvironmentRuntimeAdapter,
   type EnvironmentServiceObservation,
 } from "../lib/projects/environment-orchestrator.ts";
+
+test("system-trust HTTPS checks retain strict certificate validation", () => {
+  const options = strictHttpsHealthOptions("system");
+  assert.equal(options.rejectUnauthorized, true);
+  assert.ok(Array.isArray(options.ca));
+  assert.ok(options.ca.length > 0);
+  assert.deepEqual(strictHttpsHealthOptions("default"), { rejectUnauthorized: true });
+});
 
 function processService(id: string, port: number, dependsOn: string[] = []): EnvironmentService {
   return {
@@ -195,6 +204,7 @@ test("waits for Docker health readiness instead of failing the first starting pr
     runtimeScope: "test-workspace:sandbox",
     environment: { NODE_ENV: "test" } as NodeJS.ProcessEnv,
     redactions: [],
+    sources: [],
   } satisfies EnvironmentAdapterContext;
 
   const result = await runEnvironmentHealthChecks(
@@ -390,7 +400,64 @@ test("blocks mutually exclusive profiles when another profile is externally obse
   adapter.states.set("test-workspace:trial:api", observation("healthy", "external"));
   const result = await orchestrator.start("sandbox");
   assert.equal(result.status, "error");
-  assert.ok(result.issues.some((candidate) => candidate.code === "external-profile"));
+  assert.ok(result.issues.some((candidate) => candidate.code === "external-profile"
+    && candidate.serviceId === "api"
+    && /trial blocks sandbox: api is running externally/i.test(candidate.message)));
+  assert.equal(adapter.calls.length, 0);
+});
+
+test("stopped mutually exclusive services do not block after ownership memory is lost on restart", async () => {
+  const workspace = config([
+    profile("sandbox", [processService("api", 8080)]),
+    profile("trial", [processService("trial-api", 8180)]),
+  ]);
+  const { adapter, orchestrator } = harness(workspace);
+  adapter.states.set("test-workspace:trial:trial-api", {
+    ...observation("stopped", "none"),
+    message: "Stopped; a historical container and volume remain.",
+  });
+
+  const result = await orchestrator.start("sandbox");
+
+  assert.equal(result.status, "success");
+  assert.deepEqual(result.startedServiceIds, ["api"]);
+  assert.equal(result.issues.some((candidate) => candidate.code === "external-profile"), false);
+});
+
+test("a real DevHub-owned cross-profile service remains protected with a specific diagnostic", async () => {
+  const workspace = config([
+    profile("sandbox", [processService("api", 8080)]),
+    profile("trial", [processService("trial-api", 8180)]),
+  ]);
+  const { adapter, orchestrator } = harness(workspace);
+  adapter.states.set("test-workspace:trial:trial-api", observation("healthy", "devhub"));
+
+  const result = await orchestrator.start("sandbox");
+
+  assert.equal(result.status, "error");
+  assert.ok(result.issues.some((candidate) => candidate.code === "external-profile"
+    && candidate.serviceId === "trial-api"
+    && /trial-api is running in this DevHub session/i.test(candidate.message)));
+  assert.equal(adapter.calls.length, 0);
+});
+
+test("an unverifiable cross-profile listener remains protected with its evidence", async () => {
+  const workspace = config([
+    profile("sandbox", [processService("api", 8080)]),
+    profile("trial", [processService("trial-api", 8180)]),
+  ]);
+  const { adapter, orchestrator } = harness(workspace);
+  adapter.states.set("test-workspace:trial:trial-api", {
+    ...observation("degraded", "unverified"),
+    message: "Port 8180 is listening, but its process identity is unavailable.",
+  });
+
+  const result = await orchestrator.start("sandbox");
+
+  assert.equal(result.status, "error");
+  assert.ok(result.issues.some((candidate) => candidate.code === "external-profile"
+    && candidate.serviceId === "trial-api"
+    && /Port 8180 is listening, but its process identity is unavailable/i.test(candidate.message)));
   assert.equal(adapter.calls.length, 0);
 });
 

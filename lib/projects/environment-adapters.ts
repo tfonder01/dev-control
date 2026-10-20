@@ -19,7 +19,7 @@ import type {
   EnvironmentServiceObservation,
 } from "./environment-orchestrator";
 import { createBoundedRuntimeEnvironment } from "./runtime-environment";
-import { buildExplicitComposeCommandArgs, classifyComposePsIdentity, parseComposePsRecords, summarizeRuntimeOutput } from "./runtime-config";
+import { buildComposeContainerStateArgs, buildExplicitComposeCommandArgs, classifyComposeContainerState, classifyComposePsIdentity, composeRowsUseConfigFile, parseComposePsRecords, summarizeRuntimeOutput } from "./runtime-config";
 import { detectRunningDevServer, startDevServer, startPreviewServer, stopDevServer } from "./processes";
 import { resolveProjectService } from "./service-resolution";
 import type { Repository } from "@/lib/workspace/types";
@@ -141,6 +141,10 @@ function composeKey(context: EnvironmentAdapterContext) {
 }
 
 function composeAdapter(): EnvironmentRuntimeAdapter {
+  function environmentFiles(context: EnvironmentAdapterContext) {
+    return context.sources.flatMap((source) => source.available && source.resolvedPath ? [source.resolvedPath] : []);
+  }
+
   function mismatchMessage(reason: ReturnType<typeof classifyComposePsIdentity>["reason"], host: string, port: number) {
     const endpoint = `${host}:${port}`;
     if (reason === "missing-service") return "The configured Compose project does not contain every required service.";
@@ -166,9 +170,16 @@ function composeAdapter(): EnvironmentRuntimeAdapter {
       return { state: "degraded", ownership: "unverified", message: error instanceof Error ? error.message : "Compose runtime is unavailable.", port: service.port, url: null };
     }
     try {
-      const args = buildExplicitComposeCommandArgs(service.projectName, composePath, "status", service.services);
+      const args = buildExplicitComposeCommandArgs(service.projectName, composePath, "status", service.services, environmentFiles(context));
       const { stdout } = await execFileAsync(executable, args, { cwd: path.dirname(composePath), windowsHide: true, timeout: 10_000, maxBuffer: 1024 * 1024 });
       const identity = classifyComposePsIdentity(stdout, service.projectName, service.services, service.host ?? "127.0.0.1", service.port!);
+      if (identity.rows.length > 0 && !composeRowsUseConfigFile(identity.rows, composePath)) return {
+        state: "degraded",
+        ownership: "unverified",
+        message: "The Compose project was created from a different configuration file.",
+        port: service.port,
+        url: null,
+      };
       if (identity.state === "stopped") return { state: "stopped", ownership: "none", message: "Stopped", port: service.port, url: null };
       if (identity.state === "mismatch") return {
         state: "degraded",
@@ -189,6 +200,23 @@ function composeAdapter(): EnvironmentRuntimeAdapter {
       };
     } catch (error) {
       const detail = commandFailureDetail(error, context.redactions);
+      try {
+        const { stdout } = await execFileAsync(executable, buildComposeContainerStateArgs(service.projectName), {
+          windowsHide: true,
+          timeout: 10_000,
+          maxBuffer: 1024 * 1024,
+        });
+        const fallback = classifyComposeContainerState(stdout, service.projectName, service.services);
+        if (fallback.state === "stopped") return {
+          state: "stopped",
+          ownership: "none",
+          message: "Stopped (confirmed from Docker container state).",
+          port: service.port,
+          url: null,
+        };
+      } catch {
+        // Preserve the original Compose diagnostic when Docker metadata is also unavailable.
+      }
       return { state: "degraded", ownership: "unverified", message: detail
         ? `Docker Compose status could not be verified: ${detail}`
         : "Docker Compose status could not be verified.", port: service.port, url: null };
@@ -216,7 +244,7 @@ function composeAdapter(): EnvironmentRuntimeAdapter {
       const key = composeKey(context);
       managedCompose.set(key, identity);
       try {
-        await execFileAsync(executable, buildExplicitComposeCommandArgs(service.projectName, composePath, "start", service.services), {
+        await execFileAsync(executable, buildExplicitComposeCommandArgs(service.projectName, composePath, "start", service.services, environmentFiles(context)), {
           cwd: path.dirname(composePath),
           env: createBoundedRuntimeEnvironment(process.env, context.environment),
           windowsHide: true,
@@ -225,7 +253,7 @@ function composeAdapter(): EnvironmentRuntimeAdapter {
         });
       } catch (error) {
         try {
-          await execFileAsync(executable, buildExplicitComposeCommandArgs(service.projectName, composePath, "stop", service.services), {
+          await execFileAsync(executable, buildExplicitComposeCommandArgs(service.projectName, composePath, "stop", service.services, environmentFiles(context)), {
             cwd: path.dirname(composePath),
             env: createBoundedRuntimeEnvironment(process.env, context.environment),
             windowsHide: true,
@@ -250,7 +278,7 @@ function composeAdapter(): EnvironmentRuntimeAdapter {
         throw new Error("Compose services are not verified as DevHub-owned.");
       }
       const executable = await dockerExecutable();
-      await execFileAsync(executable, buildExplicitComposeCommandArgs(service.projectName, composePath, "stop", service.services), {
+      await execFileAsync(executable, buildExplicitComposeCommandArgs(service.projectName, composePath, "stop", service.services, environmentFiles(context)), {
         cwd: path.dirname(composePath),
         env: createBoundedRuntimeEnvironment(process.env, context.environment),
         windowsHide: true,
@@ -267,7 +295,7 @@ function composeAdapter(): EnvironmentRuntimeAdapter {
       try {
         const { composePath } = await composeMetadata(context, configured);
         const executable = await dockerExecutable();
-        const { stdout } = await execFileAsync(executable, buildExplicitComposeCommandArgs(configured.projectName, composePath, "status", configured.services), {
+        const { stdout } = await execFileAsync(executable, buildExplicitComposeCommandArgs(configured.projectName, composePath, "status", configured.services, environmentFiles(context)), {
           cwd: path.dirname(composePath), windowsHide: true, timeout: 10_000, maxBuffer: 1024 * 1024,
         });
         const row = parseComposePsRecords(stdout).find((candidate) => candidate.Service === check.service && (!candidate.Project || candidate.Project === configured.projectName));

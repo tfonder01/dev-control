@@ -38,6 +38,7 @@ export type HttpHealthCheck = {
   expectedStatuses: number[];
   timeoutMs: number;
   allowInvalidCertificate: false;
+  trustStore?: "default" | "system";
 };
 
 export type ProcessHealthCheck = {
@@ -288,7 +289,7 @@ function parseHealthChecks(value: unknown, issuePath: string, issues: Environmen
       }];
     }
     if (item.type === "http") {
-      rejectUnknownKeys(item, ["type", "url", "expectedStatuses", "timeoutMs", "allowInvalidCertificate"], itemPath, issues);
+      rejectUnknownKeys(item, ["type", "url", "expectedStatuses", "timeoutMs", "allowInvalidCertificate", "trustStore"], itemPath, issues);
       let url = "http://localhost";
       try {
         const parsed = new URL(String(item.url));
@@ -306,7 +307,11 @@ function parseHealthChecks(value: unknown, issuePath: string, issues: Environmen
       if (item.allowInvalidCertificate !== undefined && item.allowInvalidCertificate !== false) {
         issue(issues, `${itemPath}.allowInvalidCertificate`, "Invalid TLS certificates cannot be allowed.");
       }
-      return [{ type: "http", url, expectedStatuses: statuses, timeoutMs: safeTimeout, allowInvalidCertificate: false }];
+      const trustStore = item.trustStore === undefined || item.trustStore === "default" ? "default" : item.trustStore === "system" ? "system" : "default";
+      if (item.trustStore !== undefined && item.trustStore !== "default" && item.trustStore !== "system") {
+        issue(issues, `${itemPath}.trustStore`, "Must be default or system.");
+      }
+      return [{ type: "http", url, expectedStatuses: statuses, timeoutMs: safeTimeout, allowInvalidCertificate: false, trustStore }];
     }
     if (item.type === "process") {
       rejectUnknownKeys(item, ["type", "timeoutMs"], itemPath, issues);

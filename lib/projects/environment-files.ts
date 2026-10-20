@@ -22,6 +22,7 @@ export type EnvironmentFileStatus = {
   source: "repository" | "external";
   available: boolean;
   message: string;
+  resolvedPath?: string;
 };
 
 export type LoadedEnvironment = {
@@ -58,7 +59,7 @@ export async function resolveEnvironmentFiles(
         file = await resolveExternalEnvironmentFile(external.pathVariable, external.relativePath, ownerEnvironment);
       }
       resolved.push({ id, path: file });
-      sources.push({ id, source: reference.source, available: true, message: "Configured" });
+      sources.push({ id, source: reference.source, available: true, message: "Configured", resolvedPath: file });
     } catch {
       sources.push({ id, source: reference.source, available: false, message: reference.source === "external"
         ? `External environment reference ${reference.reference} is unavailable.`

@@ -81,6 +81,17 @@ The project page exposes an environment selector only when multiple profiles exi
 
 The bundled `SentryWealth` / `Sandbox` profile targets the verified loopback topology: the established `devhub-sbzyspr8ueguv6vd` Compose project and `postgres` service on `127.0.0.1:5433`, Spring Boot on `127.0.0.1:8080`, then the Next.js frontend on `127.0.0.1:3002`. Preview is the configured default, while the Environment Profiles control can select Development before start or request a controlled restart into another mode. Both modes explicitly bind the configured host and port; DevHub's own development port remains independent at 3000. The profile references repository-owned ignored environment files without copying their contents. Fixed non-secret overrides force Plaid Sandbox, clear inherited Spring profile selection, retain the Production Trial acknowledgement gate, select the Sandbox frontend marker, and supply the backend BFF endpoint during both Preview build and start. The profile never names or reads the Production Trial private environment file.
 
+The bundled `Production Trial` profile reuses the existing `sentrywealth-production-trial` Compose project, `postgres-trial` service, and `sentrywealth_production_trial_data` named volume on `127.0.0.1:5434`. It then starts Spring Boot with the `production-trial` profile on `127.0.0.1:8180`, runs the existing Next.js frontend in Preview on `127.0.0.1:3100`, and starts the repository's fixed Caddy configuration on `127.0.0.1:3443`. Open App always targets `https://localhost:3443/`. Its HTTPS health check uses the operating-system trust store with certificate validation enabled; it never accepts an invalid certificate. Caddy's graceful command is attempted only after the current listener is re-verified as part of DevHub's owned launch.
+
+Before using the Trial profile, set these DevHub server-process variables to the absolute paths of the two existing owner-controlled files. The files can remain outside both repositories; DevHub records only these reference names and loads contents only inside the trusted server process at launch time. The frontend needs no private env file: its documented non-secret API URL, display time zone, and environment marker are fixed in the trusted profile and supplied to both the Preview build and start commands.
+
+```dotenv
+DEVHUB_SENTRYWEALTH_TRIAL_DB_ENV_FILE=C:\owner-controlled\SentryWealth-Private\trial-db.env
+DEVHUB_SENTRYWEALTH_TRIAL_BACKEND_ENV_FILE=C:\owner-controlled\SentryWealth-Private\trial-backend.env
+```
+
+Missing or non-file references fail preflight. DevHub does not create the files, initialize a database, run the migration-only Compose service, alter Plaid flags, generate certificates, or change the trust store. Sandbox and Production Trial share an exclusive group, so a detected service in either profile blocks starting the other; DevHub reports the conflict and never silently stops it.
+
 Real-data profiles require a checked confirmation for every start, stop, or restart request, including server-side enforcement. Healthy matching services started outside DevHub are shown as External and are never adopted or stopped. Ownership remains intentionally in memory; after a DevHub server restart, previously launched services are observed as external until they are stopped by their owner.
 
 An optional secret-free runtime profile can make inference explicit:

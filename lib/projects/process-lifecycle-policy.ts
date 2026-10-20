@@ -7,3 +7,12 @@ export function unverifiedWindowsOwnershipPolicy(portListening: boolean) {
       : "DevHub could not verify its process identity, so it was not stopped.",
   };
 }
+
+export function trustedGracefulStopPolicy(portListening: boolean, listenerVerified: boolean) {
+  return {
+    runGracefulStop: portListening && listenerVerified,
+    message: portListening && listenerVerified
+      ? "The current listener is verified as part of the DevHub-owned launch."
+      : "The graceful stop command was not run because current listener ownership was not verified.",
+  };
+}
