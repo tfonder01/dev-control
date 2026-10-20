@@ -13,6 +13,7 @@ import {
   type WorkspaceEnvironmentConfig,
 } from "./environment-config.ts";
 import type { EnvironmentFileStatus, LoadedEnvironment } from "./environment-files";
+import type { HistoricalProcessFailure } from "./action-types";
 import type { Repository } from "@/lib/workspace/types";
 
 export type EnvironmentServiceState = "stopped" | "starting" | "started" | "healthy" | "degraded";
@@ -25,6 +26,7 @@ export type EnvironmentServiceObservation = {
   recentLogs?: string | null;
   exitClassification?: "managed-stop" | "unexpected-exit";
   exitCode?: number | null;
+  historicalFailure?: HistoricalProcessFailure | null;
   launchMode?: "dev" | "preview" | null;
   port: number | null;
   url: string | null;
@@ -105,13 +107,16 @@ function socketReachable(host: string, port: number, timeoutMs: number) {
   });
 }
 
-async function retryProbe(probe: () => Promise<boolean>, timeoutMs: number) {
+type ReadinessProbeResult = { healthy: boolean; terminalMessage?: string };
+
+async function retryProbe(probe: () => Promise<ReadinessProbeResult>, timeoutMs: number) {
   const deadline = Date.now() + timeoutMs;
   do {
-    if (await probe()) return true;
+    const result = await probe();
+    if (result.healthy || result.terminalMessage) return result;
     if (Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 250));
   } while (Date.now() < deadline);
-  return false;
+  return { healthy: false };
 }
 
 async function retryDockerHealthProbe(
@@ -169,15 +174,37 @@ function httpsStatusReachable(check: HttpHealthCheck, requestTimeoutMs: number) 
 }
 
 export const runEnvironmentHealthChecks: EnvironmentHealthRunner = async (checks, observation, adapter, context) => {
+  if (observation.state === "stopped" || observation.state === "degraded") {
+    return { healthy: false, message: observation.historicalFailure?.message ?? observation.message };
+  }
   if (checks.length === 0) {
     return {
       healthy: observation.state === "healthy" || observation.state === "started",
       message: observation.message,
     };
   }
+  const managedProcessReadinessFailure = async () => {
+    if (context.service.adapter !== "node" && context.service.adapter !== "spring-boot" && context.service.adapter !== "process") return null;
+    const current = await adapter.inspect(context);
+    if (current.state === "stopped" || current.state === "degraded") {
+      return current.historicalFailure?.message ?? current.message;
+    }
+    if (observation.ownership === "devhub" && current.ownership !== "devhub") {
+      return "DevHub can no longer verify ownership of the process that is becoming ready.";
+    }
+    return null;
+  };
+  const guardedProbe = async (probe: () => Promise<boolean>): Promise<ReadinessProbeResult> => {
+    const before = await managedProcessReadinessFailure();
+    if (before) return { healthy: false, terminalMessage: before };
+    if (!await probe()) return { healthy: false };
+    const after = await managedProcessReadinessFailure();
+    return after ? { healthy: false, terminalMessage: after } : { healthy: true };
+  };
   for (const check of checks) {
     if (check.type === "process") {
-      if (observation.state === "stopped" || observation.state === "degraded") return { healthy: false, message: "The process is not healthy." };
+      const failure = await managedProcessReadinessFailure();
+      if (failure) return { healthy: false, message: failure };
       continue;
     }
     if (check.type === "docker-health") {
@@ -187,11 +214,11 @@ export const runEnvironmentHealthChecks: EnvironmentHealthRunner = async (checks
       continue;
     }
     if (check.type === "tcp") {
-      const healthy = await retryProbe(() => socketReachable(check.host, check.port, check.timeoutMs), check.timeoutMs);
-      if (!healthy) return { healthy: false, message: `TCP readiness failed for ${check.host}:${check.port}.` };
+      const result = await retryProbe(() => guardedProbe(() => socketReachable(check.host, check.port, check.timeoutMs)), check.timeoutMs);
+      if (!result.healthy) return { healthy: false, message: result.terminalMessage ?? `TCP readiness failed for ${check.host}:${check.port}.` };
       continue;
     }
-    const healthy = await retryProbe(async () => {
+    const result = await retryProbe(() => guardedProbe(async () => {
       if (new URL(check.url).protocol === "https:" && check.trustStore === "system") {
         return httpsStatusReachable(check, Math.min(check.timeoutMs, 2_000));
       }
@@ -205,8 +232,8 @@ export const runEnvironmentHealthChecks: EnvironmentHealthRunner = async (checks
       } finally {
         clearTimeout(timeout);
       }
-    }, check.timeoutMs);
-    if (!healthy) return { healthy: false, message: `HTTP readiness failed for ${new URL(check.url).origin}.` };
+    }), check.timeoutMs);
+    if (!result.healthy) return { healthy: false, message: result.terminalMessage ?? `HTTP readiness failed for ${new URL(check.url).origin}.` };
   }
   return { healthy: true, message: "All configured health checks passed." };
 };
@@ -431,7 +458,10 @@ export class EnvironmentOrchestrator {
         const wasStopped = observation.state === "stopped";
         if (wasStopped) observation = await adapter.start(context);
         if (wasStopped && observation.ownership !== "devhub") {
-          throw new Error(`${service.name}: ${observation.message}`);
+          throw new Error(`${service.name}: ${observation.historicalFailure?.message ?? observation.message}`);
+        }
+        if (observation.state === "stopped" || observation.state === "degraded") {
+          throw new Error(`${service.name}: ${observation.historicalFailure?.message ?? observation.message}`);
         }
         if (wasStopped && observation.ownership === "devhub") started.push({ service, context });
         const health = await this.healthRunner(service.healthChecks, observation, adapter, context);

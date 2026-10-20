@@ -21,6 +21,7 @@ import type {
 import { createBoundedRuntimeEnvironment } from "./runtime-environment";
 import { buildComposeContainerStateArgs, buildExplicitComposeCommandArgs, classifyComposeContainerState, classifyComposePsIdentity, composeRowsUseConfigFile, parseComposePsRecords, summarizeRuntimeOutput } from "./runtime-config";
 import { detectRunningDevServer, startDevServer, startPreviewServer, stopDevServer } from "./processes";
+import { managedProcessObservation } from "./process-status";
 import { resolveProjectService } from "./service-resolution";
 import type { Repository } from "@/lib/workspace/types";
 
@@ -34,24 +35,6 @@ function repositoryFor(context: EnvironmentAdapterContext, reference: string) {
 function serviceFor(context: EnvironmentAdapterContext, service: NodeEnvironmentService | SpringBootEnvironmentService) {
   const repository = repositoryFor(context, service.repository);
   return { repository, service: repository ? resolveProjectService(repository, service.serviceId) : null };
-}
-
-function mapStatus(status: Awaited<ReturnType<typeof detectRunningDevServer>>): EnvironmentServiceObservation {
-  const state = status.state === "stopped" ? "stopped"
-    : status.state === "starting" ? "starting"
-      : status.state === "running" || status.state === "external" ? "started"
-        : "degraded";
-  return {
-    state,
-    ownership: status.ownedByDevHub ? "devhub" : status.state === "external" ? "external" : status.state === "stopped" ? "none" : "unverified",
-    message: status.message,
-    recentLogs: status.ownedByDevHub ? status.output ?? null : null,
-    exitClassification: status.exitClassification,
-    exitCode: status.exitCode,
-    launchMode: status.launchMode,
-    port: status.port,
-    url: status.url,
-  };
 }
 
 function applicationAdapter(expected: "node" | "spring-boot"): EnvironmentRuntimeAdapter {
@@ -71,7 +54,7 @@ function applicationAdapter(expected: "node" | "spring-boot"): EnvironmentRuntim
       const configured = context.service as NodeEnvironmentService | SpringBootEnvironmentService;
       const resolved = serviceFor(context, configured);
       if (!resolved.repository || !resolved.service) return { state: "degraded", ownership: "unverified", message: "Configured runtime is unavailable.", port: configured.port, url: null };
-      return mapStatus(await detectRunningDevServer(resolved.repository, resolved.service, {
+      return managedProcessObservation(await detectRunningDevServer(resolved.repository, resolved.service, {
         runtimeScope: context.runtimeScope,
         fixedPort: configured.port ?? undefined,
         host: configured.host ?? "127.0.0.1",
@@ -92,8 +75,9 @@ function applicationAdapter(expected: "node" | "spring-boot"): EnvironmentRuntim
       const result = configured.adapter === "node" && configured.launchMode === "preview"
         ? await startPreviewServer(resolved.repository, resolved.service, options)
         : await startDevServer(resolved.repository, resolved.service, options);
+      if (result.status === "error") throw new Error(result.message);
       if (!result.devServer) throw new Error(result.message);
-      return mapStatus(result.devServer);
+      return managedProcessObservation(result.devServer);
     },
     async stop(context) {
       const configured = context.service as NodeEnvironmentService | SpringBootEnvironmentService;
@@ -105,7 +89,7 @@ function applicationAdapter(expected: "node" | "spring-boot"): EnvironmentRuntim
         host: configured.host ?? "127.0.0.1",
       });
       if (!result.devServer) throw new Error(result.message);
-      return mapStatus(result.devServer);
+      return managedProcessObservation(result.devServer);
     },
   };
 }

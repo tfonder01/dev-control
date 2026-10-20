@@ -7,8 +7,9 @@ import { promisify } from "node:util";
 
 import type { TrustedProcessEnvironmentService } from "./environment-config";
 import type { TrustedProcessController } from "./environment-adapters";
-import type { EnvironmentAdapterContext, EnvironmentPreflightIssue, EnvironmentServiceObservation } from "./environment-orchestrator";
+import type { EnvironmentAdapterContext, EnvironmentPreflightIssue } from "./environment-orchestrator";
 import { createBoundedRuntimeEnvironment } from "./runtime-environment";
+import { managedProcessObservation } from "./process-status";
 import {
   detectTrustedManagedProcess,
   startTrustedManagedProcess,
@@ -59,20 +60,6 @@ async function resolveExecutable(executable: string) {
   return resolved;
 }
 
-function mapStatus(status: Awaited<ReturnType<typeof detectTrustedManagedProcess>>): EnvironmentServiceObservation {
-  return {
-    state: status.state === "stopped" ? "stopped" : status.state === "starting" ? "starting" : status.state === "running" || status.state === "external" ? "started" : "degraded",
-    ownership: status.ownedByDevHub ? "devhub" : status.state === "external" ? "external" : status.state === "stopped" ? "none" : "unverified",
-    message: status.message,
-    recentLogs: status.ownedByDevHub ? status.output ?? null : null,
-    exitClassification: status.exitClassification,
-    exitCode: status.exitCode,
-    launchMode: status.launchMode,
-    port: status.port,
-    url: status.url,
-  };
-}
-
 async function command(context: EnvironmentAdapterContext, service: TrustedProcessEnvironmentService): Promise<TrustedManagedCommand> {
   if (!service.port) throw new Error("A fixed process port is required.");
   const [cwd, executable, stopExecutable] = await Promise.all([
@@ -109,20 +96,21 @@ export function createTrustedProcessController(): TrustedProcessController {
     },
     async inspect(context, service) {
       try {
-        return mapStatus(await detectTrustedManagedProcess(await command(context, service)));
+        return managedProcessObservation(await detectTrustedManagedProcess(await command(context, service)));
       } catch (error) {
         return { state: "degraded", ownership: "unverified", message: error instanceof Error ? error.message : "Trusted process configuration is unavailable.", port: service.port, url: null };
       }
     },
     async start(context, service) {
       const result = await startTrustedManagedProcess(await command(context, service));
+      if (result.status === "error") throw new Error(result.message);
       if (!result.devServer) throw new Error(result.message);
-      return mapStatus(result.devServer);
+      return managedProcessObservation(result.devServer);
     },
     async stop(context, service) {
       const result = await stopTrustedManagedProcess(await command(context, service));
       if (!result.devServer) throw new Error(result.message);
-      return mapStatus(result.devServer);
+      return managedProcessObservation(result.devServer);
     },
   };
 }

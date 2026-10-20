@@ -19,3 +19,9 @@ export function classifyManagedProcessExit(
     exitCode,
   };
 }
+
+export function managedStartupSignal(wrapperExited: boolean, portListening: boolean) {
+  if (wrapperExited) return "exited" as const;
+  if (portListening) return "ready" as const;
+  return "pending" as const;
+}

@@ -27,6 +27,7 @@ export function isWindowsProcessDescendantOf(
   let current = processes.get(pid);
   while (current && !visited.has(current.pid)) {
     if (current.pid === ancestorPid) return true;
+    if (current.parentPid === ancestorPid) return true;
     visited.add(current.pid);
     current = processes.get(current.parentPid);
   }
@@ -40,6 +41,23 @@ export function collectWindowsProcessTree(
   return [...processes.values()].filter((candidate) => (
     isWindowsProcessDescendantOf(candidate.pid, rootPid, processes)
   ));
+}
+
+export function survivingWindowsProcesses(
+  captured: Map<number, WindowsProcessEvidence>,
+  current: Map<number, WindowsProcessEvidence>,
+) {
+  return [...captured.values()].filter((candidate) => sameWindowsProcess(candidate, current.get(candidate.pid)));
+}
+
+export function windowsProcessExitIsConclusive(
+  rootProcess: WindowsProcessEvidence | null,
+  captured: Map<number, WindowsProcessEvidence>,
+  current: Map<number, WindowsProcessEvidence>,
+) {
+  if (!rootProcess) return false;
+  if (survivingWindowsProcesses(captured, current).length > 0) return false;
+  return collectWindowsProcessTree(rootProcess.pid, current).length === 0;
 }
 
 export function listenerBelongsToWindowsLaunch(

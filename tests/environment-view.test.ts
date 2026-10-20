@@ -22,8 +22,11 @@ function profile(overrides: Partial<EnvironmentProfileView> = {}): EnvironmentPr
       stage: "Stopped",
       endpoint: "127.0.0.1:3000",
       diagnostic: "Stopped",
+      historicalDiagnostic: null,
+      historicalFailureAt: null,
       exitSummary: null,
       recentLogs: null,
+      historicalLogs: null,
       defaultLaunchMode: "dev",
       runningLaunchMode: null,
     }],
@@ -40,6 +43,23 @@ test("UI controls reflect stopped, owned, external, unverified, and pending stat
   const unverified = profile({ state: "degraded", services: [{ ...profile().services[0], state: "degraded", ownership: "unverified" }] });
   assert.equal(environmentControlState(unverified, false).canStart, false);
   assert.deepEqual(environmentControlState(owned, true), { canStart: false, canStop: false, canRestart: false, canOpen: false });
+});
+
+test("renders retained startup failure diagnostics without claiming live ownership", () => {
+  const failedAt = "2026-10-20T15:54:18.000Z";
+  const result = profile({
+    services: [{
+      ...profile().services[0],
+      historicalDiagnostic: "Flyway validation failed before the backend became ready.",
+      historicalFailureAt: failedAt,
+      exitSummary: "Unexpected process exit with exit code 0.",
+      historicalLogs: "Flyway validation failed",
+    }],
+  });
+
+  assert.equal(result.services[0].state, "stopped");
+  assert.equal(result.services[0].ownership, "none");
+  assert.equal(result.services[0].historicalFailureAt, failedAt);
 });
 
 test("runtime log tails are bounded and redact sensitive identity and financial fields", () => {

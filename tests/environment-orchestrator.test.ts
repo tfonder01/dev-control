@@ -117,8 +117,12 @@ function harness(workspace: WorkspaceEnvironmentConfig, setup?: (adapter: MockAd
     inspect: async () => [],
     load: async () => ({ environment: {} as NodeJS.ProcessEnv, redactions: [], sources: [] }),
   };
-  const health = async (_checks: unknown, current: EnvironmentServiceObservation) => ({ healthy: current.state !== "degraded", message: "healthy" });
-  return { adapter, orchestrator: new EnvironmentOrchestrator(workspace, repositories, adapters, files, health) };
+  const healthCalls: string[] = [];
+  const health = async (_checks: unknown, current: EnvironmentServiceObservation, _adapter: EnvironmentRuntimeAdapter, context: EnvironmentAdapterContext) => {
+    healthCalls.push(context.service.id);
+    return { healthy: current.state !== "degraded", message: "healthy" };
+  };
+  return { adapter, healthCalls, orchestrator: new EnvironmentOrchestrator(workspace, repositories, adapters, files, health) };
 }
 
 class MockAdapter implements EnvironmentRuntimeAdapter {
@@ -131,6 +135,7 @@ class MockAdapter implements EnvironmentRuntimeAdapter {
   startBarrier: Promise<void> | null = null;
   probeResults: { healthy: boolean; message: string }[] = [];
   probeCalls = 0;
+  inspectCalls = 0;
   startModes: ("dev" | "preview" | null)[] = [];
   startPorts: (number | null)[] = [];
 
@@ -141,6 +146,7 @@ class MockAdapter implements EnvironmentRuntimeAdapter {
   async preflight() { return []; }
 
   async inspect(context: EnvironmentAdapterContext) {
+    this.inspectCalls += 1;
     return this.states.get(this.key(context)) ?? observation("stopped", "none");
   }
 
@@ -219,6 +225,70 @@ test("waits for Docker health readiness instead of failing the first starting pr
   assert.equal(adapter.probeCalls, 3);
 });
 
+test("stops TCP readiness polling as soon as the managed process exit is observed", async () => {
+  const adapter = new MockAdapter();
+  const service = processService("backend", 8080);
+  const context = {
+    config: config([]),
+    profile: profile("sandbox", []),
+    service,
+    repositories: [],
+    runtimeScope: "test-workspace:sandbox",
+    environment: { NODE_ENV: "test" } as NodeJS.ProcessEnv,
+    redactions: [],
+    sources: [],
+  } satisfies EnvironmentAdapterContext;
+  adapter.states.set(adapter.key(context), {
+    ...observation("stopped", "none"),
+    historicalFailure: {
+      message: "Flyway validation failed before the backend became ready.",
+      exitCode: 0,
+      failedAt: "2026-10-20T15:54:18.000Z",
+    },
+  });
+
+  const result = await runEnvironmentHealthChecks(
+    [{ type: "tcp", host: "127.0.0.1", port: 8080, timeoutMs: 5_000 }],
+    observation("started", "devhub"),
+    adapter,
+    context,
+  );
+
+  assert.equal(result.healthy, false);
+  assert.match(result.message, /Flyway validation failed/);
+  assert.equal(adapter.inspectCalls, 1);
+});
+
+test("rejects TCP readiness when the current listener ownership is unverifiable", async () => {
+  const adapter = new MockAdapter();
+  const service = processService("backend", 8080);
+  const context = {
+    config: config([]),
+    profile: profile("sandbox", []),
+    service,
+    repositories: [],
+    runtimeScope: "test-workspace:sandbox",
+    environment: { NODE_ENV: "test" } as NodeJS.ProcessEnv,
+    redactions: [],
+    sources: [],
+  } satisfies EnvironmentAdapterContext;
+  adapter.states.set(adapter.key(context), {
+    ...observation("degraded", "devhub"),
+    message: "DevHub could not verify ownership of the current listener.",
+  });
+
+  const result = await runEnvironmentHealthChecks(
+    [{ type: "tcp", host: "127.0.0.1", port: 8080, timeoutMs: 5_000 }],
+    observation("started", "devhub"),
+    adapter,
+    context,
+  );
+
+  assert.equal(result.healthy, false);
+  assert.match(result.message, /could not verify ownership/);
+  assert.equal(adapter.inspectCalls, 1);
+});
+
 test("restart performs a complete reverse stop before dependency-ordered start", async () => {
   const workspace = config([profile("sandbox", [processService("database", 5433), processService("api", 8080, ["database"])])]);
   const { adapter, orchestrator } = harness(workspace);
@@ -281,6 +351,50 @@ test("reports a Preview build failure and rolls back only earlier owned services
     "start:sandbox:frontend",
     "stop:sandbox:backend",
   ]);
+});
+
+test("fails immediately when Spring exits before readiness, rolls back earlier resources, and permits retry", async () => {
+  const workspace = config([profile("sandbox", [
+    processService("database", 5433),
+    processService("backend", 8080, ["database"]),
+  ])]);
+  const { adapter, healthCalls, orchestrator } = harness(workspace);
+  adapter.startObservations.set("backend", {
+    ...observation("stopped", "none"),
+    message: "Stopped",
+    historicalFailure: {
+      message: "Flyway validation failed before the backend became ready.",
+      output: "sanitized Flyway output",
+      exitCode: 0,
+      failedAt: "2026-10-20T15:54:18.000Z",
+    },
+  });
+
+  const failed = await orchestrator.start("sandbox");
+  assert.equal(failed.status, "error");
+  assert.match(failed.message, /Flyway validation failed/);
+  assert.deepEqual(failed.startedServiceIds, ["database"]);
+  assert.deepEqual(failed.rolledBackServiceIds, ["database"]);
+  assert.deepEqual(healthCalls, ["database"]);
+  assert.deepEqual(adapter.calls, ["start:sandbox:database", "start:sandbox:backend", "stop:sandbox:database"]);
+
+  adapter.startObservations.set("backend", observation("started", "devhub"));
+  const retried = await orchestrator.start("sandbox");
+  assert.equal(retried.status, "success");
+  assert.deepEqual(retried.startedServiceIds, ["database", "backend"]);
+});
+
+test("Stop Environment is idempotent when every managed process has already exited", async () => {
+  const { adapter, orchestrator } = harness(config([profile("sandbox", [processService("backend", 8080)])]));
+  adapter.states.set("test-workspace:sandbox:backend", {
+    ...observation("stopped", "none"),
+    historicalFailure: { message: "Startup failed.", exitCode: 0, failedAt: "2026-10-20T15:54:18.000Z" },
+  });
+
+  const stopped = await orchestrator.stop("sandbox");
+  assert.equal(stopped.status, "success");
+  assert.equal(stopped.state, "stopped");
+  assert.deepEqual(adapter.calls, []);
 });
 
 test("coalesces duplicate starts and duplicate stops", async () => {

@@ -6,19 +6,22 @@ import type { Readable } from "node:stream";
 import net from "node:net";
 import { promisify } from "node:util";
 
-import type { DevServerStatus, NodeLaunchMode, RepositoryActionResult } from "./action-types";
+import type { DevServerStatus, HistoricalProcessFailure, NodeLaunchMode, RepositoryActionResult } from "./action-types";
 import { resolveNodeRuntime } from "./node-runtime";
 import { findAvailablePort } from "./port-allocation";
-import { classifyManagedProcessExit } from "./process-exit";
+import { classifyManagedProcessExit, managedStartupSignal } from "./process-exit";
 import {
   classifyUnmanagedListener,
   collectWindowsProcessTree,
   consistentWindowsListenerSnapshot,
   listenerBelongsToWindowsLaunch,
   sameWindowsProcess,
+  survivingWindowsProcesses,
+  windowsProcessExitIsConclusive,
   type WindowsProcessEvidence,
 } from "./process-evidence";
 import { trackedRuntimePort } from "./process-output";
+import { clearHistoricalProcessOwnership } from "./process-status";
 import { trustedGracefulStopPolicy, unverifiedWindowsOwnershipPolicy } from "./process-lifecycle-policy";
 import { createNodeProcessEnvironment } from "./runtime-environment";
 import { classifySpringFailureOutput, redactRuntimeOutput } from "./runtime-config";
@@ -44,6 +47,8 @@ type ManagedProcess = {
   port: number | null;
   rootProcess: WindowsProcessEvidence | null;
   listenerProcess: WindowsProcessEvidence | null;
+  ownedProcesses: Map<number, WindowsProcessEvidence>;
+  ownershipCaptureComplete: boolean;
   output: string;
   redactions: string[];
   stopping: boolean;
@@ -62,6 +67,7 @@ export type ServiceRuntimeOptions = {
 type RuntimeStore = {
   processes: Map<string, ManagedProcess>;
   lastStatus: Map<string, DevServerStatus>;
+  failures: Map<string, HistoricalProcessFailure>;
   reservedPorts: Set<number>;
   starts: Map<string, Promise<RepositoryActionResult>>;
 };
@@ -70,11 +76,13 @@ const runtimeGlobal = globalThis as typeof globalThis & { __devHubRuntime?: Runt
 const runtime = runtimeGlobal.__devHubRuntime ??= {
   processes: new Map(),
   lastStatus: new Map(),
+  failures: new Map(),
   reservedPorts: new Set(),
   starts: new Map(),
 };
 runtime.reservedPorts ??= new Set();
 runtime.starts ??= new Map();
+runtime.failures ??= new Map();
 
 function cleanOutput(value: string) {
   return value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\r/g, "");
@@ -274,31 +282,73 @@ async function captureWindowsOwnership(entry: ManagedProcess) {
   }
 
   entry.listenerProcess = snapshot.listener;
+  entry.ownedProcesses.set(snapshot.listener.pid, snapshot.listener);
+  if (entry.rootProcess && sameWindowsProcess(entry.rootProcess, snapshot.processes.get(entry.rootProcess.pid))) {
+    for (const owned of collectWindowsProcessTree(entry.rootProcess.pid, snapshot.processes)) entry.ownedProcesses.set(owned.pid, owned);
+  }
   return true;
 }
 
+function stoppedStatusForEntry(entry: ManagedProcess, historicalFailure: HistoricalProcessFailure | null = null): DevServerStatus {
+  return {
+    state: "stopped",
+    ownedByDevHub: false,
+    port: entry.port,
+    url: null,
+    startedAt: entry.startedAt,
+    message: "Stopped",
+    historicalFailure,
+    launchMode: entry.launchMode,
+  };
+}
+
+function recordUnexpectedFailure(entry: ManagedProcess, exitCode: number | null) {
+  const existing = runtime.failures.get(entry.runtimeKey);
+  if (existing) return existing;
+  const processName = entry.runtimeKind === "spring-boot" ? "Backend" : entry.runtimeKind === "process" ? "Local process" : entry.launchMode === "preview" ? "Preview server" : "Dev server";
+  const classifiedMessage = entry.runtimeKind === "spring-boot" ? classifySpringFailureOutput(entry.output) : null;
+  const exit = classifyManagedProcessExit(false, exitCode, processName, classifiedMessage);
+  const historicalFailure = {
+    message: exit.message,
+    output: outputExcerpt(entry.output) || undefined,
+    exitCode: exit.exitCode,
+    failedAt: new Date().toISOString(),
+  } satisfies HistoricalProcessFailure;
+  runtime.failures.set(entry.runtimeKey, historicalFailure);
+  return historicalFailure;
+}
+
 async function finalizeExitedEntry(entry: ManagedProcess, exitCode: number | null) {
-  if (runtime.processes.get(entry.runtimeKey) !== entry) return;
+  if (runtime.processes.get(entry.runtimeKey) !== entry) return true;
   if (entry.port && await isPortListening(entry.port)) {
-    if (process.platform === "win32" && await captureWindowsOwnership(entry)) return;
-    if (process.platform === "win32") return;
+    if (process.platform === "win32" && await captureWindowsOwnership(entry)) return false;
+    if (process.platform === "win32") return false;
     runtime.processes.delete(entry.runtimeKey);
     runtime.reservedPorts.delete(entry.port);
-    return;
+    return true;
+  }
+  const historicalFailure = entry.stopping ? null : recordUnexpectedFailure(entry, exitCode);
+  if (process.platform === "win32") {
+    if (!entry.ownershipCaptureComplete || !entry.rootProcess) return false;
+    const processes = await readWindowsProcessTableWithRetry();
+    if (processes && sameWindowsProcess(entry.rootProcess, processes.get(entry.rootProcess.pid))) {
+      for (const owned of collectWindowsProcessTree(entry.rootProcess.pid, processes)) entry.ownedProcesses.set(owned.pid, owned);
+    }
+    if (!processes || !windowsProcessExitIsConclusive(entry.rootProcess, entry.ownedProcesses, processes)) return false;
   }
 
   runtime.processes.delete(entry.runtimeKey);
   if (entry.port) runtime.reservedPorts.delete(entry.port);
-  const processName = entry.runtimeKind === "spring-boot" ? "Backend" : entry.runtimeKind === "process" ? "Local process" : entry.launchMode === "preview" ? "Preview server" : "Dev server";
-  const classifiedMessage = entry.runtimeKind === "spring-boot" ? classifySpringFailureOutput(entry.output) : null;
-  const exit = classifyManagedProcessExit(entry.stopping, exitCode, processName, classifiedMessage);
-  runtime.lastStatus.set(
-    entry.runtimeKey,
-    statusForEntry(entry, exit.state, exit.message, {
-      exitClassification: exit.exitClassification,
-      exitCode: exit.exitCode,
-    }),
-  );
+  if (historicalFailure) {
+    runtime.lastStatus.set(entry.runtimeKey, stoppedStatusForEntry(entry, historicalFailure));
+  } else {
+    runtime.lastStatus.set(entry.runtimeKey, {
+      ...stoppedStatusForEntry(entry, runtime.failures.get(entry.runtimeKey) ?? null),
+      exitClassification: "managed-stop",
+      exitCode,
+    });
+  }
+  return true;
 }
 
 function statusForEntry(
@@ -316,6 +366,7 @@ function statusForEntry(
     startedAt: entry.startedAt,
     message,
     output: outputExcerpt(entry.output) || undefined,
+    historicalFailure: runtime.failures.get(entry.runtimeKey) ?? null,
     ...exit,
     launchMode: entry.launchMode,
   };
@@ -326,17 +377,21 @@ async function detectManagedRuntime(key: string, servicePath: string, possibleEx
   if (entry) {
     possibleExternalPort = entry.port ?? possibleExternalPort;
     const listening = entry.port ? await isPortListening(entry.port) : false;
-    if (listening) {
+    const startupSignal = managedStartupSignal(entry.child.exitCode !== null || entry.child.signalCode !== null, listening);
+    if (startupSignal === "exited") {
+      await finalizeExitedEntry(entry, entry.child.exitCode);
+      if (runtime.processes.get(key) === entry) {
+        return statusForEntry(entry, "failed", "The process wrapper exited before readiness, but a verified or unverifiable process from its launch tree may still be running.");
+      }
+    } else if (startupSignal === "ready") {
       const ownershipVerified = process.platform !== "win32" || await captureWindowsOwnership(entry);
       if (ownershipVerified) {
         return statusForEntry(entry, "running", `Running on localhost:${entry.port}`);
       }
       const uncertain = unverifiedWindowsOwnershipPolicy(true);
-      return statusForEntry(entry, uncertain.state, uncertain.message);
-    } else if (entry.child.exitCode === null && entry.child.signalCode === null) {
-      return statusForEntry(entry, "starting", "DevHub process is starting.");
+      return statusForEntry(entry, "failed", uncertain.message);
     } else {
-      await finalizeExitedEntry(entry, entry.child.exitCode);
+      return statusForEntry(entry, "starting", "DevHub process is starting.");
     }
   }
 
@@ -367,13 +422,23 @@ async function detectManagedRuntime(key: string, servicePath: string, possibleEx
     };
   }
 
-  return runtime.lastStatus.get(key) ?? {
+  const retained = runtime.lastStatus.get(key);
+  if (retained) {
+    const normalized = clearHistoricalProcessOwnership(retained);
+    if (normalized !== retained) {
+      runtime.lastStatus.set(key, normalized);
+      if (normalized.historicalFailure) runtime.failures.set(key, normalized.historicalFailure);
+    }
+    return normalized;
+  }
+  return {
     state: "stopped",
     ownedByDevHub: false,
     port,
     url: null,
     startedAt: null,
     message: "Stopped",
+    historicalFailure: runtime.failures.get(key) ?? null,
     launchMode: null,
   };
 }
@@ -535,6 +600,8 @@ async function startDevServerOnce(repository: Repository, service: ProjectServic
     port,
     rootProcess: null,
     listenerProcess: null,
+    ownedProcesses: new Map(),
+    ownershipCaptureComplete: process.platform !== "win32",
     output: initialOutput,
     redactions: [...new Set([...(springRuntime?.redactions ?? nodeRuntime?.redactions ?? []), ...(options.redactions ?? [])])],
     stopping: false,
@@ -542,6 +609,7 @@ async function startDevServerOnce(repository: Repository, service: ProjectServic
   };
   runtime.processes.set(key, entry);
   runtime.lastStatus.delete(key);
+  runtime.failures.delete(key);
 
   child.stdout.on("data", (chunk) => appendOutput(entry, chunk));
   child.stderr.on("data", (chunk) => appendOutput(entry, chunk));
@@ -556,26 +624,37 @@ async function startDevServerOnce(repository: Repository, service: ProjectServic
   if (process.platform === "win32" && child.pid) {
     const processes = await readWindowsProcessTableWithRetry();
     entry.rootProcess = processes?.get(child.pid) ?? null;
+    if (entry.rootProcess && processes) {
+      for (const owned of collectWindowsProcessTree(entry.rootProcess.pid, processes)) entry.ownedProcesses.set(owned.pid, owned);
+    }
+    entry.ownershipCaptureComplete = true;
   }
 
   const deadline = Date.now() + (runtimeKind === "spring-boot" ? 30_000 : STARTUP_WAIT_MS);
   while (Date.now() < deadline) {
     if (!runtime.processes.has(key)) {
       const failed = runtime.lastStatus.get(key) ?? await detectRunningDevServer(repository, service, options);
-      return { status: "error", message: failed.message, exitCode: child.exitCode, output: failed.output, devServer: failed, springRuntime: springRuntime?.status, nodeRuntime: nodeRuntime?.status };
+      const historical = failed.historicalFailure;
+      return { status: "error", message: historical?.message ?? failed.message, exitCode: historical?.exitCode ?? child.exitCode, output: historical?.output ?? failed.output, devServer: failed, springRuntime: springRuntime?.status, nodeRuntime: nodeRuntime?.status };
     }
-    if (entry.port && await isPortListening(entry.port)) {
+    const listening = entry.port ? await isPortListening(entry.port) : false;
+    const startupSignal = managedStartupSignal(child.exitCode !== null || child.signalCode !== null, listening);
+    if (startupSignal === "exited") {
+      const finalized = await finalizeExitedEntry(entry, child.exitCode);
+      if (!finalized) {
+        return { status: "error", message: "The process wrapper exited before readiness, but DevHub still detects a verified process from its launch tree.", output: outputExcerpt(entry.output), devServer: statusForEntry(entry, "failed", "The process wrapper exited before readiness, but a verified process from its launch tree is still running."), springRuntime: springRuntime?.status, nodeRuntime: nodeRuntime?.status };
+      }
+      const failed = runtime.lastStatus.get(key) ?? await detectRunningDevServer(repository, service, options);
+      const historical = failed.historicalFailure;
+      return { status: "error", message: historical?.message ?? failed.message, exitCode: historical?.exitCode ?? child.exitCode, output: historical?.output ?? failed.output, devServer: failed, springRuntime: springRuntime?.status, nodeRuntime: nodeRuntime?.status };
+    }
+    if (startupSignal === "ready") {
       if (process.platform === "win32" && !await captureWindowsOwnership(entry)) {
         const uncertain = statusForEntry(entry, "starting", "The local port opened, but DevHub could not verify that the listener belongs to its process tree.");
         return { status: "error", message: uncertain.message, output: uncertain.output, devServer: uncertain, springRuntime: springRuntime?.status };
       }
       const running = statusForEntry(entry, "running", `Running on localhost:${entry.port}`);
       return { status: "running", message: running.message, output: running.output, devServer: running, springRuntime: springRuntime?.status, nodeRuntime: nodeRuntime?.status };
-    }
-    if (child.exitCode !== null || child.signalCode !== null) {
-      await finalizeExitedEntry(entry, child.exitCode);
-      const failed = runtime.lastStatus.get(key) ?? await detectRunningDevServer(repository, service, options);
-      return { status: "error", message: failed.message, exitCode: child.exitCode, output: failed.output, devServer: failed, springRuntime: springRuntime?.status, nodeRuntime: nodeRuntime?.status };
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
@@ -672,6 +751,8 @@ export async function startTrustedManagedProcess(command: TrustedManagedCommand)
     port: command.port,
     rootProcess: null,
     listenerProcess: null,
+    ownedProcesses: new Map(),
+    ownershipCaptureComplete: process.platform !== "win32",
     output: "",
     redactions: command.redactions,
     stopping: false,
@@ -679,6 +760,7 @@ export async function startTrustedManagedProcess(command: TrustedManagedCommand)
   };
   runtime.processes.set(command.runtimeKey, entry);
   runtime.lastStatus.delete(command.runtimeKey);
+  runtime.failures.delete(command.runtimeKey);
   child.stdout.on("data", (chunk) => appendOutput(entry, chunk));
   child.stderr.on("data", (chunk) => appendOutput(entry, chunk));
   child.once("error", (error) => {
@@ -689,21 +771,31 @@ export async function startTrustedManagedProcess(command: TrustedManagedCommand)
   if (process.platform === "win32" && child.pid) {
     const processes = await readWindowsProcessTableWithRetry();
     entry.rootProcess = processes?.get(child.pid) ?? null;
+    if (entry.rootProcess && processes) {
+      for (const owned of collectWindowsProcessTree(entry.rootProcess.pid, processes)) entry.ownedProcesses.set(owned.pid, owned);
+    }
+    entry.ownershipCaptureComplete = true;
   }
   const deadline = Date.now() + STARTUP_WAIT_MS;
   while (Date.now() < deadline) {
-    if (await isPortListening(command.port)) {
+    const listening = await isPortListening(command.port);
+    const startupSignal = managedStartupSignal(child.exitCode !== null || child.signalCode !== null, listening);
+    if (startupSignal === "exited") {
+      const finalized = await finalizeExitedEntry(entry, child.exitCode);
+      if (!finalized) {
+        const failed = statusForEntry(entry, "failed", "The process wrapper exited before readiness, but a verified process from its launch tree is still running.");
+        return { status: "error", message: failed.message, output: failed.output, devServer: failed };
+      }
+      const failed = runtime.lastStatus.get(command.runtimeKey);
+      return { status: "error", message: failed?.historicalFailure?.message ?? failed?.message ?? "The trusted local process exited before becoming ready.", output: failed?.historicalFailure?.output ?? failed?.output, devServer: failed };
+    }
+    if (startupSignal === "ready") {
       if (process.platform === "win32" && !await captureWindowsOwnership(entry)) {
         const uncertain = statusForEntry(entry, "starting", "The fixed port opened, but DevHub could not verify the listener ownership.");
         return { status: "error", message: uncertain.message, devServer: uncertain };
       }
       const running = statusForEntry(entry, "running", `Running on ${command.host}:${command.port}`);
       return { status: "running", message: running.message, devServer: running };
-    }
-    if (child.exitCode !== null || child.signalCode !== null) {
-      await finalizeExitedEntry(entry, child.exitCode);
-      const failed = runtime.lastStatus.get(command.runtimeKey);
-      return { status: "error", message: failed?.message ?? "The trusted local process exited before becoming ready.", output: failed?.output, devServer: failed };
     }
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
@@ -754,11 +846,12 @@ export async function stopTrustedManagedProcess(command: TrustedManagedCommand) 
       if (!await isPortListening(command.port)) {
         if (current.child.exitCode !== null) await finalizeExitedEntry(current, current.child.exitCode);
         if (!runtime.processes.has(command.runtimeKey)) {
-          const stopped = statusForEntry(current, "stopped", "Managed shutdown verified by DevHub.", {
+          const stopped = {
+            ...stoppedStatusForEntry(current, runtime.failures.get(command.runtimeKey) ?? null),
+            message: "Managed shutdown verified by DevHub.",
             exitClassification: "managed-stop",
             exitCode: current.child.exitCode,
-          });
-          stopped.url = null;
+          } satisfies DevServerStatus;
           return { status: "stopped", message: "DevHub stopped its trusted local process.", devServer: stopped } satisfies RepositoryActionResult;
         }
       }
@@ -772,6 +865,10 @@ export async function stopTrustedManagedProcess(command: TrustedManagedCommand) 
 async function stopManagedRuntime(key: string, stoppedMessage: string): Promise<RepositoryActionResult> {
   const entry = runtime.processes.get(key);
   if (!entry) {
+    const stopped = runtime.lastStatus.get(key);
+    if (stopped?.state === "stopped") {
+      return { status: "stopped", message: "The DevHub-managed process is already stopped.", output: stopped.historicalFailure?.output ?? stopped.output, devServer: stopped };
+    }
     return { status: "error", message: "No DevHub-owned process is running for this service." };
   }
 
@@ -782,6 +879,7 @@ async function stopManagedRuntime(key: string, stoppedMessage: string): Promise<
     const processes = listenerSnapshot?.processes ?? await readWindowsProcessTableWithRetry();
     const root = entry.rootProcess ? processes?.get(entry.rootProcess.pid) : null;
     const rootVerified = sameWindowsProcess(entry.rootProcess, root);
+    const survivingOwned = processes ? survivingWindowsProcesses(entry.ownedProcesses, processes) : [];
     const currentListener = listenerSnapshot?.listener ?? null;
     const listenerVerified = Boolean(processes && listenerBelongsToWindowsLaunch(
       currentListener,
@@ -790,7 +888,7 @@ async function stopManagedRuntime(key: string, stoppedMessage: string): Promise<
       processes,
     ));
 
-    if (!processes || (portListening && !listenerVerified) || (!portListening && !rootVerified)) {
+    if (!processes || (portListening && !listenerVerified) || (!portListening && !rootVerified && survivingOwned.length === 0)) {
       entry.stopping = false;
       const policy = unverifiedWindowsOwnershipPolicy(portListening);
       if (portListening) {
@@ -806,6 +904,7 @@ async function stopManagedRuntime(key: string, stoppedMessage: string): Promise<
     if (rootVerified && entry.rootProcess) {
       for (const owned of collectWindowsProcessTree(entry.rootProcess.pid, processes)) ownedProcesses.set(owned.pid, owned);
     }
+    for (const owned of survivingOwned) ownedProcesses.set(owned.pid, owned);
     if (currentListener) {
       for (const owned of collectWindowsProcessTree(currentListener.pid, processes)) ownedProcesses.set(owned.pid, owned);
     }
@@ -820,6 +919,10 @@ async function stopManagedRuntime(key: string, stoppedMessage: string): Promise<
     if (currentListener) await killTree(currentListener.pid, false);
     if (rootVerified && entry.rootProcess && entry.rootProcess.pid !== currentListener?.pid) {
       await killTree(entry.rootProcess.pid, false);
+    }
+    if (!rootVerified && !currentListener) {
+      const aliveIds = new Set(survivingOwned.map((owned) => owned.pid));
+      for (const owned of survivingOwned.filter((candidate) => !aliveIds.has(candidate.parentPid))) await killTree(owned.pid, false);
     }
 
     const gracefulDeadline = Date.now() + Math.min(1_500, STOP_WAIT_MS);
@@ -873,11 +976,12 @@ async function stopManagedRuntime(key: string, stoppedMessage: string): Promise<
 
   runtime.processes.delete(key);
   if (entry.port) runtime.reservedPorts.delete(entry.port);
-  const stopped = statusForEntry(entry, "stopped", "Managed shutdown verified by DevHub.", {
+  const stopped = {
+    ...stoppedStatusForEntry(entry, runtime.failures.get(key) ?? null),
+    message: "Managed shutdown verified by DevHub.",
     exitClassification: "managed-stop",
     exitCode: entry.child.exitCode,
-  });
-  stopped.url = null;
+  } satisfies DevServerStatus;
   runtime.lastStatus.set(key, stopped);
   return {
     status: "stopped",

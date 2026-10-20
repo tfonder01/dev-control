@@ -16,6 +16,13 @@ export type RepositoryAction =
   | "run-build"
   | "run-verify";
 
+export type HistoricalProcessFailure = {
+  message: string;
+  output?: string;
+  exitCode: number | null;
+  failedAt: string;
+};
+
 export type DevServerStatus = {
   state: "stopped" | "starting" | "running" | "external" | "port-in-use" | "failed";
   ownedByDevHub: boolean;
@@ -26,6 +33,7 @@ export type DevServerStatus = {
   output?: string;
   exitClassification?: "managed-stop" | "unexpected-exit";
   exitCode?: number | null;
+  historicalFailure?: HistoricalProcessFailure | null;
   launchMode: NodeLaunchMode | null;
 };
 

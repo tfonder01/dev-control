@@ -20,8 +20,11 @@ export type EnvironmentServiceView = {
   stage: string;
   endpoint: string | null;
   diagnostic: string;
+  historicalDiagnostic: string | null;
+  historicalFailureAt: string | null;
   exitSummary: string | null;
   recentLogs: string | null;
+  historicalLogs: string | null;
   defaultLaunchMode: NodeLaunchMode | null;
   runningLaunchMode: NodeLaunchMode | null;
 };
@@ -135,6 +138,7 @@ export function buildEnvironmentProfileView(
     state: result.state,
     services: profile.services.map((service) => {
       const observed = observations.get(service.id);
+      const historicalFailure = observed?.historicalFailure ?? null;
       return {
         id: service.id,
         name: service.name,
@@ -146,8 +150,13 @@ export function buildEnvironmentProfileView(
         stage: serviceStage(observed?.state ?? "degraded", observed?.ownership ?? "unverified"),
         endpoint: service.host && service.port ? `${service.host}:${service.port}` : null,
         diagnostic: sanitizeEnvironmentDiagnostic(observed?.message ?? "Service status is unavailable."),
-        exitSummary: exitSummary(observed?.exitClassification, observed?.exitCode),
-        recentLogs: observed?.ownership === "devhub" ? sanitizeEnvironmentLogTail(observed.recentLogs) : null,
+        historicalDiagnostic: historicalFailure ? sanitizeEnvironmentDiagnostic(historicalFailure.message) : null,
+        historicalFailureAt: historicalFailure?.failedAt ?? null,
+        exitSummary: exitSummary(observed?.exitClassification ?? (historicalFailure ? "unexpected-exit" : undefined), observed?.exitCode ?? historicalFailure?.exitCode),
+        recentLogs: observed?.ownership === "devhub" && !historicalFailure
+          ? sanitizeEnvironmentLogTail(observed.recentLogs)
+          : null,
+        historicalLogs: sanitizeEnvironmentLogTail(historicalFailure?.output),
         defaultLaunchMode: service.adapter === "node" ? service.launchMode : null,
         runningLaunchMode: service.adapter === "node" && observed?.state !== "stopped" ? observed?.launchMode ?? null : null,
       };

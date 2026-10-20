@@ -236,6 +236,8 @@ test("classifies useful Spring startup failures before the generic exit message"
   assert.match(classifySpringFailureOutput("JWT_SECRET must be at least 32 bytes") ?? "", /JWT_SECRET/);
   assert.match(classifySpringFailureOutput("org.postgresql: connection refused") ?? "", /PostgreSQL/);
   assert.match(classifySpringFailureOutput("Address already in use") ?? "", /application port/);
+  assert.match(classifySpringFailureOutput("Migration checksum mismatch for migration version 15") ?? "", /migration 15.*schema history/i);
+  assert.match(classifySpringFailureOutput("org.flywaydb.core.api.exception.FlywayValidateException: Validate failed") ?? "", /Flyway validation failed/i);
 });
 
 test("builds only targeted, repository-scoped Compose lifecycle commands", () => {

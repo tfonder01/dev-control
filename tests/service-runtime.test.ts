@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { findAvailablePort } from "../lib/projects/port-allocation.ts";
-import { classifyManagedProcessExit } from "../lib/projects/process-exit.ts";
+import { classifyManagedProcessExit, managedStartupSignal } from "../lib/projects/process-exit.ts";
 import { javaCheckCommand, nextPackageScriptCommand, packageScriptCommand, requiresWindowsCommandShell, springLaunchArgs, springWrapperCommand } from "../lib/projects/service-commands.ts";
 import type { ProjectService } from "../lib/workspace/types.ts";
 
@@ -38,6 +38,21 @@ test("classifies a nonzero exit during a requested managed stop separately from 
     exitClassification: "unexpected-exit",
     exitCode: 1,
   });
+});
+
+test("treats a zero-code Gradle wrapper exit with classified Spring failure output as a startup failure", () => {
+  assert.deepEqual(classifyManagedProcessExit(false, 0, "Backend", "Flyway validation failed before the backend became ready."), {
+    state: "failed",
+    message: "Flyway validation failed before the backend became ready.",
+    exitClassification: "unexpected-exit",
+    exitCode: 0,
+  });
+});
+
+test("prioritizes a known wrapper exit over simultaneous port readiness", () => {
+  assert.equal(managedStartupSignal(true, true), "exited");
+  assert.equal(managedStartupSignal(false, true), "ready");
+  assert.equal(managedStartupSignal(false, false), "pending");
 });
 
 test("builds fixed Next.js commands in the service working directory", () => {

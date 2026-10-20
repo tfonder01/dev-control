@@ -284,6 +284,11 @@ export function summarizeRuntimeOutput(value: string, redactions: string[], maxL
 }
 
 export function classifySpringFailureOutput(output: string) {
+  const checksum = output.match(/Migration checksum mismatch for migration version\s+([^\s]+)/i);
+  if (checksum) return `Flyway validation failed because migration ${checksum[1]} does not match the database schema history.`;
+  if (/FlywayValidateException|Validate failed:\s*Migrations have failed validation/i.test(output)) {
+    return "Flyway validation failed before the backend became ready.";
+  }
   if (/JWT_SECRET must be at least 32 bytes/i.test(output)) return "JWT_SECRET is missing or does not meet the backend's local configuration requirement.";
   if (/(connection refused|could not connect)[\s\S]*?(postgres|localhost|127\.0\.0\.1)|org\.postgresql[\s\S]*connection[\s\S]*refused/i.test(output)) {
     return "PostgreSQL refused the backend connection. Confirm the configured local database is running.";

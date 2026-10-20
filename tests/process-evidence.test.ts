@@ -6,6 +6,8 @@ import {
   consistentWindowsListenerSnapshot,
   listenerBelongsToWindowsLaunch,
   listenerMatchesServicePath,
+  survivingWindowsProcesses,
+  windowsProcessExitIsConclusive,
   type WindowsProcessEvidence,
 } from "../lib/projects/process-evidence.ts";
 
@@ -88,6 +90,28 @@ test("retains exact listener ownership after Gradle wrapper parents exit", () =>
     ),
     false,
   );
+});
+
+test("retains live ownership without a listener only for exact captured process identities", () => {
+  const daemon = process(8350, 8100, "C:\\Java\\bin\\java.exe", "org.gradle.launcher.daemon.bootstrap.GradleDaemon");
+  const captured = new Map([[daemon.pid, daemon]]);
+  assert.deepEqual(survivingWindowsProcesses(captured, new Map([[daemon.pid, daemon]])), [daemon]);
+
+  const reused = { ...daemon, creationTime: "reused-later", commandLine: "unrelated.Application" };
+  assert.deepEqual(survivingWindowsProcesses(captured, new Map([[reused.pid, reused]])), []);
+  assert.deepEqual(survivingWindowsProcesses(captured, new Map()), []);
+});
+
+test("does not conclude exit when a late child still references the exited wrapper", () => {
+  const root = process(8100, 7000, "C:\\Windows\\System32\\cmd.exe", "gradlew.bat bootRun");
+  const lateChild = process(8350, root.pid, "C:\\Java\\bin\\java.exe", "org.gradle.launcher.GradleMain bootRun");
+  const captured = new Map([[root.pid, root]]);
+
+  assert.equal(windowsProcessExitIsConclusive(root, captured, new Map([[lateChild.pid, lateChild]])), false);
+  assert.equal(windowsProcessExitIsConclusive(root, captured, new Map()), true);
+
+  const reusedRoot = { ...root, creationTime: "reused-later", commandLine: "unrelated.Application" };
+  assert.equal(windowsProcessExitIsConclusive(root, captured, new Map([[reusedRoot.pid, reusedRoot]])), false);
 });
 
 test("refuses listeners from a reusable Gradle daemon outside the launched tree", () => {

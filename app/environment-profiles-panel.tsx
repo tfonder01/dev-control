@@ -161,10 +161,13 @@ export function EnvironmentProfilesPanel({ repositoryId, initialCatalog }: Props
                 <div><dt>Ownership</dt><dd>{ownershipLabels[service.ownership]}</dd></div>
                 <div><dt>Endpoint</dt><dd>{service.endpoint ?? "Not configured"}</dd></div>
                 <div><dt>Reason</dt><dd>{service.diagnostic}</dd></div>
+                {service.historicalDiagnostic && <div><dt>Previous startup failure</dt><dd>{service.historicalDiagnostic}</dd></div>}
+                {service.historicalFailureAt && <div><dt>Failure recorded</dt><dd><time dateTime={service.historicalFailureAt}>{new Date(service.historicalFailureAt).toISOString()}</time></dd></div>}
                 {service.defaultLaunchMode && <div><dt>Mode</dt><dd>{service.runningLaunchMode ? `Running ${service.runningLaunchMode === "preview" ? "Preview" : "Development"}` : `Default ${service.defaultLaunchMode === "preview" ? "Preview" : "Development"}`}</dd></div>}
                 {service.exitSummary && <div><dt>Exit</dt><dd>{service.exitSummary}</dd></div>}
               </dl>
               {service.recentLogs && <div className="environment-log-tail"><strong>Recent sanitized output (retained)</strong><pre>{service.recentLogs}</pre></div>}
+              {service.historicalLogs && <div className="environment-log-tail"><strong>Previous startup output (sanitized)</strong><pre>{service.historicalLogs}</pre></div>}
             </details>
           </article>
         ))}
