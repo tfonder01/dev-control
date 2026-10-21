@@ -8,7 +8,11 @@ import type {
   WorkspaceEnvironmentConfig,
 } from "./environment-config";
 import { parseEnvFile } from "./runtime-config";
-import { resolveExternalEnvironmentFile, resolveRepositoryEnvironmentFile } from "./environment-file-resolution";
+import {
+  externalEnvironmentReferenceFailureMessage,
+  resolveExternalEnvironmentFile,
+  resolveRepositoryEnvironmentFile,
+} from "./environment-file-resolution";
 import type { Repository } from "@/lib/workspace/types";
 import type { EnvironmentFileProvider } from "./environment-orchestrator";
 
@@ -60,9 +64,9 @@ export async function resolveEnvironmentFiles(
       }
       resolved.push({ id, path: file });
       sources.push({ id, source: reference.source, available: true, message: "Configured", resolvedPath: file });
-    } catch {
+    } catch (error) {
       sources.push({ id, source: reference.source, available: false, message: reference.source === "external"
-        ? `External environment reference ${reference.reference} is unavailable.`
+        ? externalEnvironmentReferenceFailureMessage(reference.reference, error)
         : `Repository environment reference ${reference.repository} is unavailable.` });
     }
   }

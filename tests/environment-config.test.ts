@@ -10,7 +10,12 @@ import {
   parseWorkspaceEnvironmentConfig,
   parseWorkspaceEnvironmentConfigFile,
 } from "../lib/projects/environment-config.ts";
-import { resolveExternalEnvironmentFile, resolveRepositoryEnvironmentFile } from "../lib/projects/environment-file-resolution.ts";
+import {
+  ExternalEnvironmentFileResolutionError,
+  externalEnvironmentReferenceFailureMessage,
+  resolveExternalEnvironmentFile,
+  resolveRepositoryEnvironmentFile,
+} from "../lib/projects/environment-file-resolution.ts";
 import { buildComposeContainerStateArgs, buildExplicitComposeCommandArgs, classifyComposeContainerState, classifyComposePsIdentity, devHubComposeProjectName, devHubComposeVolumeName, devHubDependencyComposeProjectId, redactRuntimeOutput, summarizeRuntimeOutput } from "../lib/projects/runtime-config.ts";
 
 function validWorkspace() {
@@ -333,6 +338,57 @@ test("external and repository environment references stay inside their trusted r
   await assert.rejects(resolveRepositoryEnvironmentFile(repository, "../outside.env"));
   await assert.rejects(resolveExternalEnvironmentFile("PRIVATE_ROOT", "../outside.env", ownerEnvironment));
   await assert.rejects(resolveExternalEnvironmentFile("PRIVATE_ROOT", null, { NODE_ENV: "test", PRIVATE_ROOT: "relative/path" } as NodeJS.ProcessEnv));
+});
+
+test("external environment references use persistent owner configuration only when the process variable is absent", async (context) => {
+  const root = await mkdtemp(path.join(tmpdir(), "devhub-persistent-env-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const ownerFile = path.join(root, "owner.env");
+  await writeFile(ownerFile, "PRIVATE_VALUE=placeholder\n");
+  const lookups: string[] = [];
+  const readPersistent = async (name: string) => {
+    lookups.push(name);
+    return ownerFile;
+  };
+
+  assert.equal(await resolveExternalEnvironmentFile("PRIVATE_FILE", null, { NODE_ENV: "test" }, readPersistent), ownerFile);
+  assert.deepEqual(lookups, ["PRIVATE_FILE"]);
+
+  lookups.length = 0;
+  assert.equal(await resolveExternalEnvironmentFile("PRIVATE_FILE", null, { NODE_ENV: "test", PRIVATE_FILE: ownerFile }, readPersistent), ownerFile);
+  assert.deepEqual(lookups, []);
+});
+
+test("external environment references distinguish missing variables from invalid files without exposing paths", async (context) => {
+  const root = await mkdtemp(path.join(tmpdir(), "devhub-invalid-env-"));
+  context.after(() => rm(root, { recursive: true, force: true }));
+  const directory = path.join(root, "not-a-file");
+  await mkdir(directory);
+
+  await assert.rejects(
+    resolveExternalEnvironmentFile("PRIVATE_FILE", null, { NODE_ENV: "test" }, async () => undefined),
+    (error) => error instanceof ExternalEnvironmentFileResolutionError
+      && error.failure === "missing-variable"
+      && !error.message.includes("PRIVATE_FILE"),
+  );
+  for (const invalidPath of ["relative/path", path.join(root, "missing.env"), directory]) {
+    await assert.rejects(
+      resolveExternalEnvironmentFile("PRIVATE_FILE", null, { NODE_ENV: "test", PRIVATE_FILE: invalidPath }, async () => undefined),
+      (error) => error instanceof ExternalEnvironmentFileResolutionError
+        && error.failure === "invalid-path"
+        && !error.message.includes(invalidPath),
+    );
+  }
+  assert.equal(
+    externalEnvironmentReferenceFailureMessage("production-trial-compose", new ExternalEnvironmentFileResolutionError("missing-variable")),
+    "External environment reference production-trial-compose is missing its configured path variable.",
+  );
+  assert.equal(
+    externalEnvironmentReferenceFailureMessage("production-trial-compose", new ExternalEnvironmentFileResolutionError("invalid-path")),
+    "External environment reference production-trial-compose points to a missing or invalid file.",
+  );
+  assert.equal(externalEnvironmentReferenceFailureMessage("production-trial-compose", new Error(root)),
+    "External environment reference production-trial-compose is unavailable.");
 });
 
 test("explicit Compose commands preserve project and service identity without destructive operations", () => {
