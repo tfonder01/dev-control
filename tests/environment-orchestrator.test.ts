@@ -520,6 +520,76 @@ test("blocks mutually exclusive profiles when another profile is externally obse
   assert.equal(adapter.calls.length, 0);
 });
 
+function switchingWorkspace() {
+  const database = (id: string, port: number, observeOnly: boolean): EnvironmentService => ({
+    ...processService(id, port), adapter: "docker-compose", repository: "application",
+    composeFile: `infrastructure/${id}.yml`, projectName: id, services: ["postgres"], observeOnly,
+    healthChecks: [{ type: "docker-health", service: "postgres", timeoutMs: 1_000 }],
+  });
+  return {
+    ...config([
+      profile("sandbox", [database("database", 5433, false), processService("api", 8080, ["database"])]),
+      { ...profile("production-trial", [database("trial-database", 5434, true), processService("trial-api", 8180, ["trial-database"])]), risk: "real-data" as const },
+    ]),
+    repositories: [{ id: "application", repositoryId: "aaaaaaaaaaaaaaaa" }],
+  };
+}
+
+for (const target of ["sandbox", "production-trial"]) {
+  for (const ownership of ["external", "devhub"] as const) {
+    // The observe-only Trial adapter never reports DevHub ownership.
+    if (target === "sandbox" && ownership === "devhub") continue;
+    test(`${target} can start and restart while the other profile has only a ${ownership} database`, async () => {
+      const workspace = switchingWorkspace();
+      const { adapter, orchestrator } = harness(workspace, undefined, [nodeRepository()]);
+      adapter.states.set("test-workspace:sandbox:database", observation("healthy", target === "sandbox" ? "external" : ownership));
+      adapter.states.set("test-workspace:production-trial:trial-database", observation("healthy", "external"));
+      const options = { confirmedRealData: true };
+      const api = target === "sandbox" ? "api" : "trial-api";
+      const databasesBefore = [...adapter.states.entries()];
+
+      const started = await orchestrator.start(target, options);
+      assert.equal(started.status, "success");
+      assert.deepEqual(started.startedServiceIds, [api]);
+      assert.equal((await orchestrator.restart(target, options)).status, "success");
+      assert.equal((await orchestrator.stop(target, options)).status, "success");
+      assert.deepEqual(adapter.calls, [`start:${target}:${api}`, `stop:${target}:${api}`, `start:${target}:${api}`, `stop:${target}:${api}`]);
+      for (const [key, before] of databasesBefore) assert.deepEqual(adapter.states.get(key), before);
+    });
+  }
+
+  test(`${target} rollback leaves both external databases running`, async () => {
+    const workspace = switchingWorkspace();
+    const selected = workspace.profiles.find((candidate) => candidate.id === target)!;
+    const api = target === "sandbox" ? "api" : "trial-api";
+    selected.services.push(processService("web", 3002, [api]));
+    const { adapter, orchestrator } = harness(workspace, undefined, [nodeRepository()]);
+    adapter.states.set("test-workspace:sandbox:database", observation("healthy", "external"));
+    adapter.states.set("test-workspace:production-trial:trial-database", observation("healthy", "external"));
+    adapter.failStart.add("web");
+    const result = await orchestrator.start(target, { confirmedRealData: true });
+    assert.equal(result.status, "error");
+    assert.deepEqual(result.rolledBackServiceIds, [api]);
+    assert.deepEqual(adapter.calls, [`start:${target}:${api}`, `start:${target}:web`, `stop:${target}:${api}`]);
+    assert.equal(adapter.states.get("test-workspace:production-trial:trial-database")?.state, "healthy");
+    assert.equal(adapter.states.get("test-workspace:sandbox:database")?.state, "healthy");
+  });
+}
+
+for (const conflict of ["port", "unverified", "application"] as const) {
+  test(`a remaining database does not bypass a cross-profile ${conflict} conflict`, async () => {
+    const workspace = switchingWorkspace();
+    if (conflict === "port") workspace.profiles[0].services[1].port = 5434;
+    const { adapter, orchestrator } = harness(workspace, undefined, [nodeRepository()]);
+    adapter.states.set("test-workspace:production-trial:trial-database", observation(conflict === "unverified" ? "degraded" : "healthy", conflict === "unverified" ? "unverified" : "external"));
+    if (conflict === "application") adapter.states.set("test-workspace:production-trial:trial-api", observation("healthy", "external"));
+    const result = await orchestrator.start("sandbox");
+    assert.equal(result.status, "error");
+    assert.ok(result.issues.some((issue) => issue.code === "external-profile" && issue.serviceId === (conflict === "application" ? "trial-api" : "trial-database")));
+    assert.deepEqual(adapter.calls, []);
+  });
+}
+
 test("stopped mutually exclusive services do not block after ownership memory is lost on restart", async () => {
   const workspace = config([
     profile("sandbox", [processService("api", 8080)]),

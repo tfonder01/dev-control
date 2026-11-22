@@ -356,6 +356,13 @@ export class EnvironmentOrchestrator {
         for (const service of other.services) {
           const context = await this.context(other, service, false);
           const observation = await this.adapters[service.adapter].inspect(context);
+          // Verified dependencies on separate ports may outlive their application's profile.
+          // Keep application exclusivity, unknown identities, and port conflicts protected.
+          if (service.adapter === "docker-compose"
+            && (observation.state === "healthy" || observation.state === "started")
+            && (observation.ownership === "external" || observation.ownership === "devhub")
+            && service.port !== null
+            && !profile.services.some((candidate) => candidate.port === service.port)) continue;
           if (observation.state !== "stopped") {
             const reason = observation.ownership === "unverified"
               ? `could not be verified: ${observation.message}`

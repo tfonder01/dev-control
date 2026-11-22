@@ -174,7 +174,7 @@ function composeAdapter(): EnvironmentRuntimeAdapter {
       };
       const healthy = identity.state === "healthy";
       const managed = managedCompose.get(composeKey(context));
-      const owned = Boolean(managed && managed.composePath === composePath && managed.projectName === service.projectName && managed.services.join("\0") === service.services.join("\0"));
+      const owned = !service.observeOnly && Boolean(managed && managed.composePath === composePath && managed.projectName === service.projectName && managed.services.join("\0") === service.services.join("\0"));
       return {
         state: healthy ? "healthy" : "started",
         ownership: owned ? "devhub" : "external",
@@ -222,6 +222,7 @@ function composeAdapter(): EnvironmentRuntimeAdapter {
     inspect,
     async start(context) {
       const service = context.service as DockerComposeEnvironmentService;
+      if (service.observeOnly) throw new Error(`${service.name} is observe-only; its existing Compose service must already be running. DevHub will not provision or start it.`);
       const { composePath } = await composeMetadata(context, service);
       const executable = await dockerExecutable();
       const identity = { composePath, projectName: service.projectName, services: [...service.services] };
@@ -255,6 +256,7 @@ function composeAdapter(): EnvironmentRuntimeAdapter {
     },
     async stop(context) {
       const service = context.service as DockerComposeEnvironmentService;
+      if (service.observeOnly) throw new Error(`${service.name} is observe-only and cannot be stopped by DevHub.`);
       const { composePath } = await composeMetadata(context, service);
       const key = composeKey(context);
       const managed = managedCompose.get(key);

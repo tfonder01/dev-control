@@ -232,8 +232,9 @@ test("tracked SentryWealth Production Trial preserves existing identities and th
   const database = trial.services.find((service) => service.id === "trial-database");
   assert.equal(database?.adapter, "docker-compose");
   if (database?.adapter === "docker-compose") {
-    assert.equal(database.projectName, "sentrywealth-production-trial");
-    assert.equal(database.composeFile, "infrastructure/docker-compose.production-trial.yml");
+    assert.equal(database.projectName, "sentrywealth-production-trial-restored");
+    assert.equal(database.composeFile, "infrastructure/docker-compose.production-trial-restored.yml");
+    assert.equal(database.observeOnly, true);
     assert.deepEqual(database.services, ["postgres-trial"]);
     assert.equal(database.host, "127.0.0.1");
     assert.equal(database.port, 5434);
@@ -276,10 +277,10 @@ test("tracked SentryWealth Production Trial preserves existing identities and th
   assert.equal(JSON.stringify(trial).includes("PLAID_ENABLED"), false);
   assert.equal(JSON.stringify(trial).includes("PLAID_PRODUCTION_TRIAL_ACKNOWLEDGED"), false);
 
-  const compose = await readFile(path.resolve("..", "SentryWealth", "infrastructure", "docker-compose.production-trial.yml"), "utf8");
-  assert.match(compose, /^name:\s*sentrywealth-production-trial\s*$/m);
+  const compose = await readFile(path.resolve("..", "SentryWealth", "infrastructure", "docker-compose.production-trial-restored.yml"), "utf8");
+  assert.match(compose.replace(/^\uFEFF/, ""), /^name:\s*sentrywealth-production-trial-restored\s*$/m);
   assert.match(compose, /^\s{2}postgres-trial:\s*$/m);
-  assert.match(compose, /^\s{4}name:\s*sentrywealth_production_trial_data\s*$/m);
+  assert.match(compose, /^\s{4}name:\s*sentrywealth_production_trial_restored_data\s*$/m);
 
   const caddyfile = await readFile(path.resolve("..", "SentryWealth", "infrastructure", "production-trial", "Caddyfile"), "utf8");
   assert.match(caddyfile, /skip_install_trust/);

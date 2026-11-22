@@ -85,6 +85,7 @@ export type DockerComposeEnvironmentService = EnvironmentServiceBase & {
   composeFile: string;
   services: string[];
   projectName: string;
+  observeOnly?: boolean;
 };
 
 export type TrustedProcessEnvironmentService = EnvironmentServiceBase & {
@@ -363,7 +364,8 @@ function parseService(value: unknown, issuePath: string, issues: EnvironmentConf
     return { ...base, adapter: "spring-boot", repository: identifier(item.repository, `${issuePath}.repository`, issues), serviceId: String(item.serviceId ?? ""), springProfile };
   }
   if (item.adapter === "docker-compose") {
-    rejectUnknownKeys(item, [...commonKeys, "repository", "composeFile", "services", "projectName"], issuePath, issues);
+    rejectUnknownKeys(item, [...commonKeys, "repository", "composeFile", "services", "projectName", "observeOnly"], issuePath, issues);
+    if (item.observeOnly !== undefined && typeof item.observeOnly !== "boolean") issue(issues, `${issuePath}.observeOnly`, "Must be a boolean.");
     const projectName = typeof item.projectName === "string" && /^[a-z0-9][a-z0-9_-]{0,62}$/.test(item.projectName)
       ? item.projectName
       : "invalid";
@@ -377,6 +379,7 @@ function parseService(value: unknown, issuePath: string, issues: EnvironmentConf
       composeFile: safeRelativePath(item.composeFile, `${issuePath}.composeFile`, issues),
       services,
       projectName,
+      ...(item.observeOnly === undefined ? {} : { observeOnly: item.observeOnly === true }),
     };
   }
   if (item.adapter === "process") {
