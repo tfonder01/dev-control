@@ -204,7 +204,8 @@ test("tracked SentryWealth Sandbox manifest validates with deterministic depende
   if (frontend?.healthChecks[0]?.type === "http") assert.equal(frontend.healthChecks[0].url, "http://127.0.0.1:3002/");
   assert.equal(frontend?.environment.SENTRYWEALTH_API_URL, "http://127.0.0.1:8080");
   assert.equal(frontend?.environment.PORT, undefined);
-  assert.equal(sandbox.services.find((service) => service.id === "backend")?.environment.PLAID_ENV, "sandbox");
+  assert.equal(backend?.environment.PLAID_ENV, "sandbox");
+  assert.equal(backend?.environment.PLAID_PRODUCTION_TRIAL_AUTOMATIC_SYNC_ACKNOWLEDGED, undefined);
   assert.equal(JSON.stringify(manifest).includes("PLAID_SECRET"), false);
 });
 
@@ -244,7 +245,10 @@ test("tracked SentryWealth Production Trial preserves existing identities and th
   const backend = trial.services.find((service) => service.id === "trial-backend");
   assert.equal(backend?.adapter === "spring-boot" ? backend.springProfile : null, "production-trial");
   assert.equal(backend?.port, 8180);
-  assert.deepEqual(backend?.environment, { SENTRYWEALTH_PLAID_SIMPLIFIEDONBOARDING_ENABLED: "true" });
+  assert.deepEqual(backend?.environment, {
+    PLAID_PRODUCTION_TRIAL_AUTOMATIC_SYNC_ACKNOWLEDGED: "true",
+    SENTRYWEALTH_PLAID_SIMPLIFIEDONBOARDING_ENABLED: "true",
+  });
 
   const frontend = trial.services.find((service) => service.id === "trial-frontend");
   assert.equal(frontend?.adapter === "node" ? frontend.launchMode : null, "preview");

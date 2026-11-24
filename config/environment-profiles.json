@@ -169,6 +169,7 @@
               "springProfile": "production-trial",
               "dependsOn": ["trial-database"],
               "environment": {
+                "PLAID_PRODUCTION_TRIAL_AUTOMATIC_SYNC_ACKNOWLEDGED": "true",
                 "SENTRYWEALTH_PLAID_SIMPLIFIEDONBOARDING_ENABLED": "true"
               },
               "environmentFiles": [
