@@ -234,7 +234,7 @@ test("tracked SentryWealth Production Trial preserves existing identities and th
   if (database?.adapter === "docker-compose") {
     assert.equal(database.projectName, "sentrywealth-production-trial-restored");
     assert.equal(database.composeFile, "infrastructure/docker-compose.production-trial-restored.yml");
-    assert.equal(database.observeOnly, true);
+    assert.equal(database.startExisting, true);
     assert.deepEqual(database.services, ["postgres-trial"]);
     assert.equal(database.host, "127.0.0.1");
     assert.equal(database.port, 5434);

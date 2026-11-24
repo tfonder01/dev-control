@@ -124,6 +124,64 @@ function composeKey(context: EnvironmentAdapterContext) {
   return `${context.runtimeScope}:${context.service.id}`;
 }
 
+const trialProject = "sentrywealth-production-trial-restored";
+const trialService = "postgres-trial";
+const trialContainer = `${trialProject}-${trialService}-1`;
+const trialComposeFile = "infrastructure/docker-compose.production-trial-restored.yml";
+const trialVolume = "sentrywealth_production_trial_restored_data";
+
+function usesExistingTrialDatabase({ config, profile, service }: EnvironmentAdapterContext) {
+  return service.adapter === "docker-compose" && (service.startExisting || (config.id === "sentrywealth"
+    && ((profile.id === "production-trial" && service.id === "trial-database")
+      || [trialProject, "sentrywealth-production-trial"].includes(service.projectName)
+      || [trialComposeFile, "infrastructure/docker-compose.production-trial.yml"].includes(service.composeFile))));
+}
+
+type DockerPorts = Record<string, { HostIp: string; HostPort: string }[] | null>;
+
+function publishesTrialPort(ports: DockerPorts) {
+  const bindings = ports["5432/tcp"];
+  return bindings?.length === 1 && bindings[0].HostIp === "127.0.0.1" && bindings[0].HostPort === "5434"
+    && Object.values(ports).filter((value) => value?.length).length === 1;
+}
+
+async function inspectExistingTrialDatabase(context: EnvironmentAdapterContext) {
+  const service = context.service as DockerComposeEnvironmentService;
+  if (context.config.id !== "sentrywealth" || context.profile.risk !== "real-data"
+    || service.repository !== "application" || (!service.startExisting && !service.observeOnly)
+    || service.composeFile !== trialComposeFile || service.projectName !== trialProject
+    || service.services.length !== 1 || service.services[0] !== trialService
+    || service.host !== "127.0.0.1" || service.port !== 5434
+    || !service.healthChecks.some((check) => check.type === "docker-health" && check.service === trialService)) {
+    throw new Error("The restored Trial database configuration does not match the required identity and health check.");
+  }
+  const { composePath } = await composeMetadata(context, service);
+  const executable = await dockerExecutable();
+  // Request only identity and readiness metadata. Docker's full inspect includes credentials.
+  const fields = [
+    ".Id", ".Name", ".Config.Labels", ".Mounts", ".HostConfig.PortBindings", ".NetworkSettings.Ports", ".State.Status",
+  ].map((field) => `{{json ${field}}}`);
+  fields.push("{{if .State.Health}}{{json .State.Health.Status}}{{else}}null{{end}}");
+  const { stdout } = await execFileAsync(executable, ["container", "inspect", "--format", `[${fields.join(",")}]`, trialContainer], {
+    windowsHide: true, timeout: 10_000, maxBuffer: 1024 * 1024,
+  });
+  const [id, name, labels, mounts, configuredPorts, activePorts, state, health] = JSON.parse(stdout) as [
+    string, string, Record<string, string>, { Type: string; Name: string; Destination: string; RW: boolean }[],
+    DockerPorts, DockerPorts, string, string | null,
+  ];
+  const dataMounts = mounts.filter((mount) => mount.Destination === "/var/lib/postgresql/data");
+  const configFile = labels["com.docker.compose.project.config_files"];
+  if (!/^[a-f0-9]{64}$/.test(id) || name !== `/${trialContainer}`
+    || labels["com.docker.compose.project"] !== trialProject || labels["com.docker.compose.service"] !== trialService
+    || !configFile || path.normalize(configFile).toLowerCase() !== path.normalize(composePath).toLowerCase()
+    || dataMounts.length !== 1 || dataMounts[0].Type !== "volume" || dataMounts[0].Name !== trialVolume || !dataMounts[0].RW
+    || !publishesTrialPort(configuredPorts) || (state === "running" && !publishesTrialPort(activePorts))) {
+    throw new Error("The existing container does not match the restored Trial database identity.");
+  }
+  if (!["created", "exited", "running"].includes(state)) throw new Error("The restored Trial container is in an unexpected state.");
+  return { id, executable, state, health };
+}
+
 function composeAdapter(): EnvironmentRuntimeAdapter {
   function environmentFiles(context: EnvironmentAdapterContext) {
     return context.sources.flatMap((source) => source.available && source.resolvedPath ? [source.resolvedPath] : []);
@@ -145,6 +203,23 @@ function composeAdapter(): EnvironmentRuntimeAdapter {
 
   async function inspect(context: EnvironmentAdapterContext): Promise<EnvironmentServiceObservation> {
     const service = context.service as DockerComposeEnvironmentService;
+    if (usesExistingTrialDatabase(context)) {
+      try {
+        const { state, health } = await inspectExistingTrialDatabase(context);
+        if (state !== "running") return { state: "stopped", ownership: "none", message: "Restored database is stopped.", port: service.port, url: null };
+        return {
+          state: health === "healthy" ? "healthy" : "started", ownership: "external",
+          message: health === "healthy" ? "Restored database is healthy." : "Waiting for restored database health.",
+          port: service.port, url: null,
+        };
+      } catch {
+        return {
+          state: "degraded", ownership: "unverified",
+          message: "The existing restored Trial container, volume, and loopback binding could not be verified.",
+          port: service.port, url: null,
+        };
+      }
+    }
     let composePath: string;
     let executable: string;
     try {
@@ -210,6 +285,7 @@ function composeAdapter(): EnvironmentRuntimeAdapter {
   return {
     async preflight(context) {
       const service = context.service as DockerComposeEnvironmentService;
+      if (usesExistingTrialDatabase(context)) return []; // The identity check runs in inspect.
       try {
         await composeMetadata(context, service);
         const executable = await dockerExecutable();
@@ -223,6 +299,23 @@ function composeAdapter(): EnvironmentRuntimeAdapter {
     async start(context) {
       const service = context.service as DockerComposeEnvironmentService;
       if (service.observeOnly) throw new Error(`${service.name} is observe-only; its existing Compose service must already be running. DevHub will not provision or start it.`);
+      if (usesExistingTrialDatabase(context)) {
+        try {
+          const { id, executable, state } = await inspectExistingTrialDatabase(context);
+          if (state !== "running") {
+            try {
+              await execFileAsync(executable, ["container", "start", id], { windowsHide: true, timeout: 60_000 });
+            } catch (error) {
+              const current = await inspectExistingTrialDatabase(context);
+              // Task Scheduler may have started the same container in the meantime.
+              if (current.id !== id || current.state !== "running") throw error;
+            }
+          }
+        } catch {
+          throw new Error("The existing restored Trial database could not be verified or started.");
+        }
+        return inspect(context);
+      }
       const { composePath } = await composeMetadata(context, service);
       const executable = await dockerExecutable();
       const identity = { composePath, projectName: service.projectName, services: [...service.services] };
@@ -256,6 +349,7 @@ function composeAdapter(): EnvironmentRuntimeAdapter {
     },
     async stop(context) {
       const service = context.service as DockerComposeEnvironmentService;
+      if (usesExistingTrialDatabase(context)) throw new Error("The restored Trial database stays available for scheduled backups.");
       if (service.observeOnly) throw new Error(`${service.name} is observe-only and cannot be stopped by DevHub.`);
       const { composePath } = await composeMetadata(context, service);
       const key = composeKey(context);
@@ -278,6 +372,10 @@ function composeAdapter(): EnvironmentRuntimeAdapter {
     async probe(check, context) {
       const configured = context.service as DockerComposeEnvironmentService;
       if (!configured.services.includes(check.service)) return { healthy: false, message: `${check.service} is not part of the configured Compose service set.` };
+      if (usesExistingTrialDatabase(context)) {
+        const status = await inspect(context);
+        return { healthy: status.state === "healthy", message: status.message };
+      }
       try {
         const { composePath } = await composeMetadata(context, configured);
         const executable = await dockerExecutable();

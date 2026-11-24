@@ -8,6 +8,8 @@ import { ProjectActionsPanel } from "@/app/project-actions-panel";
 import { GitActionsPanel } from "@/app/git-actions-panel";
 import { EnvironmentProfilesPanel } from "@/app/environment-profiles-panel";
 import { ProjectLinksPanel } from "@/app/project-links-panel";
+import { getSentryWealthQa } from "@/app/sentrywealth-qa-actions";
+import { SentryWealthQaPanel } from "@/app/sentrywealth-qa-panel";
 import { getDependencyStatus } from "@/lib/projects/dependencies";
 import { getEnvironmentCatalogForRepository } from "@/lib/projects/environment-service";
 import { detectProjectLinks } from "@/lib/projects/project-link-detection";
@@ -23,7 +25,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
   const { id } = await params;
   const repository = await getRepositoryFromSnapshot(id);
   if (!repository) notFound();
-  const [serviceModels, projectLinksConfig, detectedProjectLinks, environmentCatalog] = await Promise.all([
+  const [serviceModels, projectLinksConfig, detectedProjectLinks, environmentCatalog, qa] = await Promise.all([
     Promise.all(repository.services.map(async (service): Promise<ProjectServiceActionsModel> => {
       const isSpringBoot = service.kind === "spring-boot";
       const isNextJs = service.technologies.some((technology) => technology.name === "Next.js");
@@ -52,6 +54,7 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
     getProjectLinks(repository.id),
     detectProjectLinks(repository),
     getEnvironmentCatalogForRepository(repository.id),
+    getSentryWealthQa(repository.id),
   ]);
 
   return (
@@ -88,6 +91,8 @@ export default async function ProjectPage({ params }: { params: Promise<{ id: st
         repositoryId={repository.id}
         initialCatalog={environmentCatalog}
       />
+
+      {qa && <SentryWealthQaPanel repositoryId={repository.id} initial={qa} />}
 
       <ProjectActionsPanel
         repositoryId={repository.id}

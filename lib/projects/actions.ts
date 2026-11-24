@@ -1,9 +1,9 @@
 import "server-only";
 
-import { spawn } from "node:child_process";
-
 import type { RepositoryActionResult } from "./action-types";
-import { javaCheckCommand, packageScriptCommand, requiresWindowsCommandShell } from "./service-commands";
+import { spawnProjectCommand } from "./command-process";
+import { cleanProcessOutput, MAX_PROCESS_OUTPUT_CHARS } from "./process-output";
+import { javaCheckCommand, packageScriptCommand } from "./service-commands";
 import {
   discoverCursor,
   discoverIntelliJ,
@@ -14,15 +14,10 @@ import {
 } from "./windows-tools";
 import type { ProjectScript, ProjectService, Repository } from "@/lib/workspace/types";
 
-const MAX_OUTPUT_CHARS = 24_000;
 const CHECK_TIMEOUT_MS = 10 * 60_000;
 
-function cleanOutput(value: string) {
-  return value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\r/g, "");
-}
-
 function outputExcerpt(output: string) {
-  return cleanOutput(output).trim().split("\n").slice(-40).join("\n").slice(-MAX_OUTPUT_CHARS);
+  return cleanProcessOutput(output).trim().split("\n").slice(-40).join("\n").slice(-MAX_PROCESS_OUTPUT_CHARS);
 }
 
 function localActionUnavailable(): RepositoryActionResult {
@@ -95,19 +90,13 @@ export async function openTerminal(repository: Repository): Promise<RepositoryAc
 async function executeAllowlisted(service: ProjectService, executable: string, args: string[]): Promise<RepositoryActionResult> {
   const started = performance.now();
   return new Promise((resolve) => {
-    const command = requiresWindowsCommandShell(executable)
-      ? { executable: process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe", args: ["/d", "/s", "/c", executable, ...args] }
-      : { executable, args };
-    const child = spawn(/* turbopackIgnore: true */ command.executable, command.args, {
-      cwd: service.path,
-      env: { ...process.env, CI: "1", NO_COLOR: "1", FORCE_COLOR: "0" },
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
+    const child = spawnProjectCommand({ executable, args, cwd: service.path }, {
+      ...process.env, CI: "1", NO_COLOR: "1", FORCE_COLOR: "0",
     });
     let output = "";
     let settled = false;
     const append = (chunk: Buffer | string) => {
-      output = `${output}${chunk.toString()}`.slice(-MAX_OUTPUT_CHARS);
+      output = `${output}${chunk.toString()}`.slice(-MAX_PROCESS_OUTPUT_CHARS);
     };
     const finish = (result: RepositoryActionResult) => {
       if (settled) return;
@@ -126,8 +115,8 @@ async function executeAllowlisted(service: ProjectService, executable: string, a
       });
     }, CHECK_TIMEOUT_MS);
 
-    child.stdout.on("data", append);
-    child.stderr.on("data", append);
+    child.stdout?.on("data", append);
+    child.stderr?.on("data", append);
     child.once("error", (error) => finish({
       status: "error",
       message: "The predefined check could not be started.",

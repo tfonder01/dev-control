@@ -464,13 +464,14 @@ export class EnvironmentOrchestrator {
         if (observation.ownership === "unverified") throw new Error(`${service.name} has an unverified listener or runtime conflict.`);
         const wasStopped = observation.state === "stopped";
         if (wasStopped) observation = await adapter.start(context);
-        if (wasStopped && observation.ownership !== "devhub") {
+        const persistentDependency = service.adapter === "docker-compose" && service.startExisting && observation.ownership === "external";
+        if (wasStopped && observation.ownership !== "devhub" && !persistentDependency) {
           throw new Error(`${service.name}: ${observation.historicalFailure?.message ?? observation.message}`);
         }
         if (observation.state === "stopped" || observation.state === "degraded") {
           throw new Error(`${service.name}: ${observation.historicalFailure?.message ?? observation.message}`);
         }
-        if (wasStopped && observation.ownership === "devhub") started.push({ service, context });
+        if (wasStopped) started.push({ service, context });
         const health = await this.healthRunner(service.healthChecks, observation, adapter, context);
         if (!health.healthy) throw new Error(`${service.name}: ${health.message}`);
         observation = {

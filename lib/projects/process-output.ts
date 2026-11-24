@@ -1,3 +1,9 @@
+export const MAX_PROCESS_OUTPUT_CHARS = 24_000;
+
+export function cleanProcessOutput(value: string) {
+  return value.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\r/g, "");
+}
+
 export function trackedRuntimePort(currentPort: number | null, output: string) {
   // DevHub explicitly assigns every managed runtime a port. Later application
   // output can mention other localhost services and must not retarget ownership.

@@ -70,7 +70,8 @@
               "environment": {
                 "SPRING_PROFILES_ACTIVE": "",
                 "PLAID_ENV": "sandbox",
-                "PLAID_PRODUCTION_TRIAL_ACKNOWLEDGED": "false"
+                "PLAID_PRODUCTION_TRIAL_ACKNOWLEDGED": "false",
+                "SENTRYWEALTH_PLAID_SIMPLIFIEDONBOARDING_ENABLED": "true"
               },
               "environmentFiles": [
                 {
@@ -139,7 +140,7 @@
               "repository": "application",
               "composeFile": "infrastructure/docker-compose.production-trial-restored.yml",
               "projectName": "sentrywealth-production-trial-restored",
-              "observeOnly": true,
+              "startExisting": true,
               "services": ["postgres-trial"],
               "dependsOn": [],
               "environment": {},

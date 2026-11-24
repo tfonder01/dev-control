@@ -195,6 +195,50 @@ test("starts in dependency order and stops in deterministic reverse order", asyn
   assert.deepEqual(adapter.calls.slice(3), ["stop:sandbox:web", "stop:sandbox:api", "stop:sandbox:database"]);
 });
 
+test("waits for a start-existing database and leaves it available across stop, restart, and rollback", async () => {
+  const workspace = config([profile("trial", [{
+    id: "database", name: "PostgreSQL", adapter: "docker-compose", repository: "application",
+    composeFile: "infrastructure/restored.yml", projectName: "restored", services: ["postgres"], startExisting: true,
+    dependsOn: [], environment: {}, environmentFiles: [], healthChecks: [{ type: "docker-health", service: "postgres", timeoutMs: 1_000 }],
+    host: "127.0.0.1", port: 5434,
+  }, processService("api", 8180, ["database"]), processService("web", 3100, ["api"])])]);
+  workspace.repositories = [{ id: "application", repositoryId: "aaaaaaaaaaaaaaaa" }];
+  const adapter = new MockAdapter();
+  adapter.startObservations.set("database", observation("started", "external"));
+  const adapters = { node: adapter, "spring-boot": adapter, "docker-compose": adapter, process: adapter } satisfies EnvironmentAdapterRegistry;
+  const files = {
+    inspect: async () => [],
+    load: async () => ({ environment: {} as NodeJS.ProcessEnv, redactions: [], sources: [] }),
+  };
+  let ready!: () => void;
+  const readiness = new Promise<void>((resolve) => { ready = resolve; });
+  let checking!: () => void;
+  const checkingReadiness = new Promise<void>((resolve) => { checking = resolve; });
+  const orchestrator = new EnvironmentOrchestrator(workspace, [nodeRepository()], adapters, files, async (_checks, _observation, _adapter, context) => {
+    if (context.service.id === "database") {
+      checking();
+      await readiness;
+    }
+    return { healthy: true, message: "healthy" };
+  });
+
+  adapter.failStart.add("web");
+  const starting = orchestrator.start("trial");
+  await checkingReadiness;
+  assert.deepEqual(adapter.calls, ["start:trial:database"]);
+  ready();
+  const failed = await starting;
+  assert.equal(failed.status, "error");
+  assert.deepEqual(failed.startedServiceIds, ["database", "api"]);
+  assert.deepEqual(failed.rolledBackServiceIds, ["api"]);
+
+  adapter.failStart.clear();
+  assert.equal((await orchestrator.start("trial")).status, "success");
+  assert.equal((await orchestrator.restart("trial")).status, "success");
+  assert.equal((await orchestrator.stop("trial")).status, "success");
+  assert.deepEqual(adapter.calls.filter((call) => call.endsWith(":database")), ["start:trial:database"]);
+});
+
 test("waits for Docker health readiness instead of failing the first starting probe", async () => {
   const adapter = new MockAdapter();
   adapter.probeResults.push(
