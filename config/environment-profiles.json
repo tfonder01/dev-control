@@ -168,7 +168,9 @@
               "serviceId": "5uwmxJzD4rY1MF2Z",
               "springProfile": "production-trial",
               "dependsOn": ["trial-database"],
-              "environment": {},
+              "environment": {
+                "SENTRYWEALTH_PLAID_SIMPLIFIEDONBOARDING_ENABLED": "true"
+              },
               "environmentFiles": [
                 {
                   "source": "external",

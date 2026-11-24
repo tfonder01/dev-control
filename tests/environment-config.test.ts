@@ -244,7 +244,7 @@ test("tracked SentryWealth Production Trial preserves existing identities and th
   const backend = trial.services.find((service) => service.id === "trial-backend");
   assert.equal(backend?.adapter === "spring-boot" ? backend.springProfile : null, "production-trial");
   assert.equal(backend?.port, 8180);
-  assert.deepEqual(backend?.environment, {});
+  assert.deepEqual(backend?.environment, { SENTRYWEALTH_PLAID_SIMPLIFIEDONBOARDING_ENABLED: "true" });
 
   const frontend = trial.services.find((service) => service.id === "trial-frontend");
   assert.equal(frontend?.adapter === "node" ? frontend.launchMode : null, "preview");
